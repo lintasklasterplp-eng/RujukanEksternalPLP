@@ -798,11 +798,14 @@ const KEY="puskesmas_lanjut_rujukan_v1";
 const STAMP_KEY="puskesmas_lanjut_stempel_v1";
 const WA_SETTINGS_KEY="puskesmas_lanjut_wa_settings_v1";
 const RECEIVER_HIDE_KEY="puskesmas_lanjut_receiver_hidden_v1";
-const ACCOUNTS_KEY="puskesmas_lanjut_accounts_v1";
+const ACCOUNTS_KEY="puskesmas_lanjut_accounts_v2";
 const ACCOUNTS_CLOUD_PATH="accounts/users.json";
+const ACCOUNTS_CLOUD_SYNC_KEY="puskesmas_lanjut_accounts_cloud_synced_v1";
+const ACCOUNTS_CLOUD_VERSION=3;
 const ADMIN_RESET_PASSWORD="admin";
 let accountsCloudReady=false;
 let accountsCloudBusy=false;
+let accountsCloudLastError="";
 
 function seedAccounts(){
   const now=new Date().toISOString();
@@ -817,6 +820,14 @@ function loadAccounts(){
     const raw=JSON.parse(localStorage.getItem(ACCOUNTS_KEY));
     if(Array.isArray(raw) && raw.length) return raw;
   }catch(e){}
+  // Kompatibilitas dengan versi lama: migrasikan cache akun lokal sekali saja.
+  try{
+    const legacy=JSON.parse(localStorage.getItem("puskesmas_lanjut_accounts_v1"));
+    if(Array.isArray(legacy) && legacy.length){
+      localStorage.setItem(ACCOUNTS_KEY,JSON.stringify(legacy));
+      return legacy;
+    }
+  }catch(e){}
   const seed=seedAccounts();
   localStorage.setItem(ACCOUNTS_KEY,JSON.stringify(seed));
   return seed;
@@ -830,7 +841,6 @@ async function hashAccountPassword(password){
     const digest=await crypto.subtle.digest("SHA-256",data);
     return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,"0")).join("");
   }
-  // Fallback agar browser lama tetap dapat bekerja; password lama tetap dapat diverifikasi.
   return "plain:"+value;
 }
 async function normalizeAccountRecord(account){
@@ -840,41 +850,53 @@ async function normalizeAccountRecord(account){
   a.name=String(a.name||"").trim();
   a.role=String(a.role||"Petugas");
   a.createdAt=a.createdAt||new Date().toISOString();
-  if(!a.passwordHash && Object.prototype.hasOwnProperty.call(a,"password")){
-    a.passwordHash=await hashAccountPassword(a.password);
-  }
+  a.active=a.active!==false;
+  if(!a.passwordHash && Object.prototype.hasOwnProperty.call(a,"password")) a.passwordHash=await hashAccountPassword(a.password);
   delete a.password;
   return a;
 }
 async function normalizeAccounts(list){
   const out=[];
-  for(const a of (Array.isArray(list)?list:[])) out.push(await normalizeAccountRecord(a));
+  for(const a of (Array.isArray(list)?list:[])){
+    const n=await normalizeAccountRecord(a);
+    if(n.username && n.passwordHash) out.push(n);
+  }
   return out;
 }
 async function fetchAccountsFromBucket(){
-  try{
-    const data=await cloudDownloadJson(ACCOUNTS_CLOUD_PATH);
-    if(Array.isArray(data?.accounts)) return data.accounts;
-    if(Array.isArray(data)) return data;
-    return null;
-  }catch(err){
-    const msg=String(err?.message||err||"");
-    if(/404|not found|empty|does not exist/i.test(msg)) return null;
-    throw err;
+  const paths=[ACCOUNTS_CLOUD_PATH,"accounts/users-v2.json"];
+  let lastError=null;
+  for(const path of paths){
+    try{
+      const data=await cloudDownloadJson(path);
+      if(Array.isArray(data?.accounts)) return {accounts:data.accounts,path};
+      if(Array.isArray(data)) return {accounts:data,path};
+    }catch(err){
+      lastError=err;
+      const msg=String(err?.message||err||"");
+      if(/401|403|permission|policy|row-level|not allowed/i.test(msg)) throw new Error("Akses akun cloud ditolak oleh policy Supabase Storage untuk "+path+". "+msg);
+      if(!/404|not found|empty|does not exist/i.test(msg)) break;
+    }
   }
+  if(lastError && !/404|not found|empty|does not exist/i.test(String(lastError?.message||""))) throw lastError;
+  return null;
 }
 async function saveAccountsToBucket(list){
   const normalized=await normalizeAccounts(list);
+  if(!normalized.length) throw new Error("Daftar akun kosong, pembaruan cloud dibatalkan.");
   const payload={
-    version:2,
+    version:ACCOUNTS_CLOUD_VERSION,
     type:"shared_application_accounts",
     bucket:"rujukan_eksternal",
+    path:ACCOUNTS_CLOUD_PATH,
     updatedAt:new Date().toISOString(),
     accounts:normalized
   };
   await cloudUpload(ACCOUNTS_CLOUD_PATH,JSON.stringify(payload),"application/json");
   saveAccounts(normalized);
+  localStorage.setItem(ACCOUNTS_CLOUD_SYNC_KEY,"1");
   accountsCloudReady=true;
+  accountsCloudLastError="";
   return normalized;
 }
 async function syncAccountsFromBucket({createIfMissing=true}={}){
@@ -884,66 +906,70 @@ async function syncAccountsFromBucket({createIfMissing=true}={}){
   }
   accountsCloudBusy=true;
   try{
-    let remote=null;
-    try{remote=await fetchAccountsFromBucket();}catch(err){
-      console.warn("Sinkronisasi akun Supabase gagal:",err);
+    let remoteInfo=null;
+    try{remoteInfo=await fetchAccountsFromBucket();}
+    catch(err){
+      accountsCloudLastError=String(err?.message||err||"Gagal membaca akun cloud");
       accountsCloudReady=false;
-      return loadAccounts();
+      // Jangan pernah mengganti data cloud dengan seed lokal. Cache lokal hanya
+      // dipakai sebagai fallback setelah perangkat ini pernah tersinkronisasi.
+      if(localStorage.getItem(ACCOUNTS_CLOUD_SYNC_KEY)==="1") return loadAccounts();
+      throw err;
     }
-    if(Array.isArray(remote) && remote.length){
-      const normalized=await normalizeAccounts(remote);
+    if(remoteInfo && Array.isArray(remoteInfo.accounts) && remoteInfo.accounts.length){
+      const normalized=await normalizeAccounts(remoteInfo.accounts);
       saveAccounts(normalized);
-      // Pastikan format/hash lama langsung dibakukan di cloud.
-      const needsRewrite=remote.some(a=>!a?.passwordHash);
-      if(needsRewrite && createIfMissing){
-        try{await saveAccountsToBucket(normalized);}catch(e){console.warn("Normalisasi akun ke Supabase gagal:",e);}
-      }
+      localStorage.setItem(ACCOUNTS_CLOUD_SYNC_KEY,"1");
       accountsCloudReady=true;
+      accountsCloudLastError="";
+      // Migrasi format lama tetap dilakukan, tetapi hanya jika cloud berhasil dibaca.
+      const needsRewrite=remoteInfo.accounts.some(a=>!a?.passwordHash || a.active===undefined);
+      if(needsRewrite && createIfMissing){
+        try{await saveAccountsToBucket(normalized);}catch(e){console.warn("Normalisasi akun cloud gagal:",e);}
+      }
       return normalized;
     }
     const local=loadAccounts();
     const normalized=await normalizeAccounts(local);
     if(createIfMissing){
-      try{
-        await saveAccountsToBucket(normalized);
-        return normalized;
-      }catch(err){
-        console.warn("Pembuatan data akun awal di Supabase gagal:",err);
+      try{return await saveAccountsToBucket(normalized);}catch(err){
+        accountsCloudLastError=String(err?.message||err||"Gagal membuat akun cloud");
+        accountsCloudReady=false;
+        // Data lokal boleh dipakai pada perangkat pertama untuk membuat akun cloud,
+        // tetapi tidak dianggap sinkron untuk perangkat baru.
+        saveAccounts(normalized);
+        localStorage.removeItem(ACCOUNTS_CLOUD_SYNC_KEY);
+        throw err;
       }
     }
-    saveAccounts(normalized);
-    accountsCloudReady=false;
     return normalized;
   }finally{accountsCloudBusy=false;}
 }
 async function accountPasswordMatches(account,password){
+  if(account?.active===false) return false;
   if(account?.passwordHash){
     const h=await hashAccountPassword(password);
-    return h===String(account.passwordHash);
+    return h===String(account.passwordHash) || (String(account.passwordHash).startsWith("plain:") && String(account.passwordHash).slice(6)===String(password||""));
   }
   return String(account?.password||"")===String(password||"");
 }
 async function renderAccountList(){
   const box=document.getElementById("accountListBox");
   if(!box) return;
-  const rows=await syncAccountsFromBucket({createIfMissing:true});
-  box.innerHTML=`
-    <div style="margin-top:14px;font-weight:800;font-size:12px">Akun Terdaftar (${rows.length})</div>
-    <div class="help" style="margin-top:4px">Akun disimpan bersama di bucket <b>rujukan_eksternal</b> pada <code>accounts/users.json</code>, sehingga dapat digunakan dari perangkat lain.</div>
-    <table class="account-table">
-      <thead><tr><th>Nama</th><th>Username</th><th>Peran</th><th>Aksi</th></tr></thead>
-      <tbody>
-        ${rows.map(a=>`
-          <tr>
-            <td>${escText(a.name)}</td>
-            <td><b>${escText(a.username)}</b></td>
-            <td><span class="account-badge ${a.role==="Admin"?"admin":""}">${escText(a.role)}</span></td>
-            <td><div class="account-actions">
-              ${a.username!=="admin (admin)"?`<button type="button" class="btn-danger small-btn" onclick="deleteManagedAccount('${encodeURIComponent(a.id)}')">Hapus</button>`:'<span class="help">Akun utama</span>'}
-            </div></td>
-          </tr>`).join("")}
-      </tbody>
-    </table>`;
+  try{
+    const rows=await syncAccountsFromBucket({createIfMissing:true});
+    box.innerHTML=`
+      <div style="margin-top:14px;font-weight:800;font-size:12px">Akun Terdaftar (${rows.length})</div>
+      <div class="help" style="margin-top:4px">Sumber bersama: <b>rujukan_eksternal/${ACCOUNTS_CLOUD_PATH}</b>.</div>
+      <table class="account-table">
+        <thead><tr><th>Nama</th><th>Username</th><th>Peran</th><th>Aksi</th></tr></thead>
+        <tbody>${rows.map(a=>`<tr><td>${escText(a.name)}</td><td><b>${escText(a.username)}</b></td><td><span class="account-badge ${a.role==="Admin"?"admin":""}">${escText(a.role)}</span></td><td><div class="account-actions">${a.username!=="admin (admin)"?`<button type="button" class="btn-danger small-btn" onclick="deleteManagedAccount('${encodeURIComponent(a.id)}')">Hapus</button>`:'<span class="help">Akun utama</span>'}</div></td></tr>`).join("")}</tbody>
+      </table>`;
+  }catch(err){
+    console.error(err);
+    box.innerHTML=`<div class="help" style="color:#b91c1c"><b>User cloud belum dapat diakses.</b><br>${escText(err?.message||String(err))}<br><br>Periksa policy Storage bucket <b>rujukan_eksternal</b> untuk operasi baca/tulis objek <code>accounts/users.json</code>.</div>`;
+    throw err;
+  }
 }
 async function deleteManagedAccount(encodedId){
   const id=decodeURIComponent(encodedId);
@@ -957,7 +983,7 @@ async function deleteManagedAccount(encodedId){
     alert(`Akun ${item.username} berhasil dihapus dari semua perangkat.`);
   }catch(err){
     console.error("Penghapusan akun cloud gagal",err);
-    alert("Akun belum dihapus dari Supabase. Periksa koneksi/bucket rujukan_eksternal lalu coba lagi.");
+    alert("Akun belum dihapus. Periksa policy bucket rujukan_eksternal.");
   }
 }
 window.deleteManagedAccount=deleteManagedAccount;
@@ -971,39 +997,31 @@ function unlockAccountSettings(){
   }
   document.getElementById("adminGate").hidden=true;
   document.getElementById("accountManager").hidden=false;
-  renderAccountList().catch(err=>{
-    console.error(err);
-    alert("Daftar user belum dapat dimuat dari Supabase.");
-  });
+  renderAccountList().catch(()=>{});
 }
 async function createManagedAccount(){
   const name=document.getElementById("newAccountName")?.value.trim()||"";
   const role=document.getElementById("newAccountRole")?.value||"Petugas";
   const username=document.getElementById("newAccountUsername")?.value.trim().toLowerCase()||"";
   const password=document.getElementById("newAccountPassword")?.value||"";
-  if(!name||!username||!password){alert("Lengkapi nama, username, dan password.");return;}
+  if(!name||!username||!password){alert("Lengkapi nama, username dan password.");return;}
   if(password.length<4){alert("Password minimal 4 karakter.");return;}
   const suffixMap={"Puskesmas Lanjut":" (puskesmas lanjut)","RSUD Dabo":" (rsud dabo)","Admin":" (admin)"};
   const expected=suffixMap[role]||"";
-  if(expected && !username.toLowerCase().endsWith(expected)){
-    alert(`Username harus diakhiri dengan ${expected.replace(/[()]/g,'')}.`);
-    return;
-  }
+  if(expected && !username.endsWith(expected)){alert(`Username harus diakhiri dengan ${expected.replace(/[()]/g,'')}.`);return;}
   try{
     const list=await syncAccountsFromBucket({createIfMissing:true});
     if(list.some(a=>String(a.username||"").toLowerCase()===username)){alert("Username sudah digunakan.");return;}
-    const account={id:"u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8),name,username,role,createdAt:new Date().toISOString(),passwordHash:await hashAccountPassword(password)};
-    list.push(account);
+    list.push({id:"u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8),name,username,role,active:true,createdAt:new Date().toISOString(),passwordHash:await hashAccountPassword(password)});
     await saveAccountsToBucket(list);
     ["newAccountName","newAccountUsername","newAccountPassword"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});
     await renderAccountList();
-    alert(`Akun ${username} berhasil dibuat dan dapat dipakai di perangkat lain.`);
+    alert(`Akun ${username} berhasil dibuat dan tersimpan di Supabase. Akun ini dapat dipakai pada perangkat lain.`);
   }catch(err){
     console.error("Pembuatan akun cloud gagal",err);
-    alert("Akun belum dibuat. Pastikan bucket rujukan_eksternal dapat ditulisi oleh aplikasi.");
+    alert("Akun belum tersimpan ke Supabase. Pastikan policy Storage bucket rujukan_eksternal mengizinkan READ/INSERT/UPDATE untuk aplikasi.");
   }
 }
-
 
 /* ===== LOGIN / ROLE ROUTING ===== */
 const LOGIN_RECENT_KEY="puskesmas_lanjut_recent_logins_v1";
@@ -1109,17 +1127,18 @@ function applyRoleAccess(mode){
 }
 async function performLogin(username,password){
   const normalized=String(username||"").trim().toLowerCase();
-  let accounts=await syncAccountsFromBucket({createIfMissing:true});
-  let account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized);
-  if(account && !(await accountPasswordMatches(account,password))){
-    return {ok:false,message:"Username atau password salah."};
+  let accounts;
+  try{
+    // Pada perangkat baru, autentikasi wajib membaca akun bersama dari Supabase.
+    // Cache lokal hanya boleh menjadi fallback setelah perangkat pernah tersinkron.
+    accounts=await syncAccountsFromBucket({createIfMissing:false});
+  }catch(err){
+    const msg=String(err?.message||err||"");
+    if(localStorage.getItem(ACCOUNTS_CLOUD_SYNC_KEY)==="1") accounts=loadAccounts();
+    else return {ok:false,message:"Daftar user belum dapat dibaca dari Supabase. Periksa bucket rujukan_eksternal dan policy Storage untuk accounts/users.json."};
   }
-  if(!account){
-    // Satu kali fallback ke cache lokal jika koneksi cloud sedang bermasalah.
-    accounts=loadAccounts();
-    account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized);
-    if(!account || !(await accountPasswordMatches(account,password))) return {ok:false,message:"Username atau password salah."};
-  }
+  let account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized && a.active!==false);
+  if(!account || !(await accountPasswordMatches(account,password))) return {ok:false,message:"Username atau password salah."};
   const mode=loginModeFromUsername(account.username);
   if(!mode) return {ok:false,message:"Akun belum memiliki akhiran yang valid. Gunakan (Puskesmas Lanjut), (RSUD Dabo), atau (admin)."};
   const session={id:account.id,username:account.username,name:account.name,role:account.role,mode,loginAt:new Date().toISOString()};
@@ -1806,6 +1825,35 @@ async function hydrateReceiverEventNotifications(){
   renderRoleNotificationCenter();
 }
 
+async function purgeResolvedFileRequestCloud(no){
+  const safeNo=cloudSafeNo(no);
+  if(!safeNo) return;
+  // Hanya menghapus delivery "file_request" lama. Riwayat notifikasi hasil
+  // balasan/file_return tetap dipertahankan agar dashboard RS masih memiliki jejak.
+  try{
+    const rows=await cloudList(SUPABASE_SENDER_NOTIFICATION_PREFIX);
+    const targets=[];
+    for(const row of (rows||[]).filter(x=>String(x.name||"").endsWith(".json"))){
+      try{
+        const path=`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/${row.name}`;
+        const delivery=await cloudDownloadJson(path);
+        if(String(delivery?.no||"")!==String(no)) continue;
+        if(delivery?.type!=="file_request") continue;
+        targets.push(path);
+      }catch(e){ console.warn("Delivery instruksi lama gagal diperiksa",row.name,e); }
+    }
+    if(targets.length) await cloudDeleteMany(targets);
+  }catch(e){
+    console.warn("Pembersihan instruksi RS lama di Supabase gagal:",e);
+  }
+}
+function closeFileRequestState(item,when=Date.now()){
+  if(!item) return;
+  const ts=new Date(when||Date.now()).toISOString();
+  item.fileRequestResolvedAt=ts;
+  delete item.fileRequest;
+}
+
 async function hydrateSenderDeliveryNotifications(){
   try{
     let rows=await cloudList(SUPABASE_SENDER_NOTIFICATION_PREFIX);
@@ -1849,26 +1897,36 @@ async function hydrateSenderDeliveryNotifications(){
         item.answer.statusText="Sudah dikirim kembali";
         item.status="completed";
       }else if(delivery.type==="file_return"){
-        item.fileRequest=item.fileRequest||{};
-        item.fileRequest.sentFileName=delivery.fileName||item.fileRequest.sentFileName;
-        item.fileRequest.sentAt=delivery.sentAt||item.fileRequest.sentAt;
+        const closedAt=delivery.sentAt||new Date().toISOString();
         item.status="file_sent";
+        closeFileRequestState(item,closedAt);
       }else if(delivery.type==="file_request"){
-        item.fileRequest=item.fileRequest||{};
-        if(delivery.request) item.fileRequest.name=delivery.request;
-        item.fileRequest.message=delivery.request||item.fileRequest.message||item.fileRequest.name;
-        item.fileRequest.createdAt=delivery.createdAt||delivery.sentAt||item.fileRequest.createdAt||new Date().toISOString();
-        item.fileRequest.requestedBy=delivery.sourceRole||item.fileRequest.requestedBy||"RSUD";
+        const deliveredAt=delivery.createdAt||delivery.sentAt||new Date().toISOString();
+        const closedAt=new Date(item.fileRequestResolvedAt||0).getTime();
+        const requestAt=new Date(deliveredAt).getTime();
+        // Delivery instruksi yang lebih lama daripada penutupan tidak boleh
+        // menghidupkan kembali instruksi lama pada perangkat lain.
+        if(Number.isFinite(closedAt) && closedAt>0 && Number.isFinite(requestAt) && requestAt<=closedAt){
+          continue;
+        }
+        item.fileRequest={
+          name:delivery.request||delivery.message||"",
+          message:delivery.request||delivery.message||"",
+          createdAt:deliveredAt,
+          requestedBy:delivery.sourceRole||"RSUD",
+          targetParty:"sender",
+          sourceRole:"RSUD Dabo"
+        };
         item.status="request_file";
         if(getRoleNotificationParty()==="sender" && (!currentRef || !db.referrals.some(x=>x.no===currentRef))){
           currentRef=item.no;
         }
       }else if(delivery.type==="request_reply"){
-        item.fileRequest=item.fileRequest||{};
-        if(delivery.request) item.fileRequest.name=delivery.request;
-        if(delivery.responseMessage) item.fileRequest.responseMessage=delivery.responseMessage;
-        item.fileRequest.responseMessageAt=delivery.sentAt||item.fileRequest.responseMessageAt;
+        // Balasan menutup instruksi aktif. Jangan membangun kembali objek
+        // fileRequest lama hanya karena riwayat event dibaca ulang.
+        const closedAt=delivery.sentAt||new Date().toISOString();
         item.status="request_replied";
+        closeFileRequestState(item,closedAt);
       }
       saveDB(db);
     }
@@ -1920,6 +1978,17 @@ async function syncReferralNow(no){
 async function getReferralResetMarker(y){
   try{ return await cloudDownloadJson(`sequences/${Number(y)}/RESET.json`); }catch(e){ return null; }
 }
+function sanitizeResolvedFileRequestState(item){
+  if(!item) return false;
+  const terminal=["request_replied","file_sent","completed","acc","rejected","cancelled"];
+  if(terminal.includes(String(item.status||"")) && item.fileRequest){
+    const resolved=item.fileRequest.sentAt||item.fileRequest.responseMessageAt||item.updatedAt||new Date().toISOString();
+    closeFileRequestState(item,resolved);
+    return true;
+  }
+  return false;
+}
+
 async function hydrateSupabaseReferrals(){
   if(supabaseHydrating) return false; supabaseHydrating=true;
   try{
@@ -1937,6 +2006,7 @@ async function hydrateSupabaseReferrals(){
     });
     const localMap=new Map(localRows.map(x=>[x.no,x]));
     for(const x of remote){const local=localMap.get(x.no);const rt=new Date(x.updatedAt||x.createdAt||0).getTime();const lt=new Date(local?.updatedAt||local?.createdAt||0).getTime();if(!local||rt>lt)localMap.set(x.no,{...local,...x});}
+    for(const item of localMap.values()) sanitizeResolvedFileRequestState(item);
     db.referrals=Array.from(localMap.values()).filter(x=>!x.deleted).sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
     db.seqByYear=db.seqByYear||{};
     for(const x of db.referrals){const m=String(x.no||"").match(/^(\d+)\/PKM-TU\/([IVX]+)\/(\d{4})$/);if(m)db.seqByYear[m[4]]=Math.max(Number(db.seqByYear[m[4]]||0),Number(m[1]||0));}
@@ -2144,6 +2214,16 @@ function resetDeferredAttachmentViews(no='') {
   const answerBtn=document.getElementById('btnLoadAnswerFile');
   if(answer){answer.innerHTML='';answer.hidden=true;}
   if(answerBtn) answerBtn.disabled=!no;
+  const requestedList=document.getElementById('requestedReplyList');
+  const requestedNotice=document.getElementById('requestedReplyNotice');
+  const requestedCloud=document.getElementById('requestedReplyCloudStatus');
+  const requestedInput=document.getElementById('requestedReplyMessage');
+  const requestedStatus=document.getElementById('requestedReplyMessageStatus');
+  if(requestedList) requestedList.innerHTML='';
+  if(requestedNotice) requestedNotice.textContent=no?'Memeriksa instruksi aktif pada nomor ini...':'Tidak ada instruksi RS aktif.';
+  if(requestedCloud) requestedCloud.textContent=no?'☁ Menunggu instruksi RS untuk nomor ini.':'☁ Tidak ada nomor aktif.';
+  if(requestedInput) requestedInput.value='';
+  if(requestedStatus) requestedStatus.textContent='';
 }
 async function showIncomingAttachments(){
   if(!currentRef) return;
@@ -2251,12 +2331,10 @@ async function sendRequestedReplyMessage(){
   const idx=db.referrals.findIndex(x=>x.no===currentRef);
   if(idx<0){alert("Surat rujukan belum ditemukan.");return;}
   const item=db.referrals[idx];
-  item.fileRequest=item.fileRequest||{};
-  item.fileRequest.responseMessage=msg;
-  item.fileRequest.responseMessageAt=new Date().toISOString();
-  item.fileRequest.responseBy=item.rPenanggungJawab||item.rDokter||"UPTD Puskesmas";
+  const activeRequest={...(item.fileRequest||{})};
+  const closedAt=new Date().toISOString();
   item.status=item.status==='completed'?'completed':'request_replied';
-  item.updatedAt=new Date().toISOString();
+  item.updatedAt=closedAt;
   addPartyNotification(item,'sender',`Balasan instruksi tersimpan untuk No. ${item.no}.`,'ok');
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
@@ -2267,7 +2345,7 @@ async function sendRequestedReplyMessage(){
   try{
     await publishReceiverEventNotification(item,{
       type:"request_reply",
-      request:item.fileRequest.name||"Permintaan file/informasi",
+      request:activeRequest.name||activeRequest.message||"Permintaan file/informasi",
       responseMessage:msg,
       notification:`Balasan Puskesmas untuk instruksi RS pada No. ${item.no}: ${msg}`
     });
@@ -2275,7 +2353,18 @@ async function sendRequestedReplyMessage(){
     alert('Balasan sudah tersimpan, tetapi notifikasi cloud belum terbentuk: '+(e?.message||''));
     return;
   }
-  broadcastReferral(currentRef,`Balasan instruksi RS untuk No. ${item.no} telah dikirim.`);
+  // Setelah balasan terkirim, instruksi aktif ditutup dan delivery instruksi
+  // lama dihapus dari cloud agar tidak menempel kembali pada perangkat lain.
+  db=loadDB();
+  const live=db.referrals.find(x=>x.no===currentRef);
+  if(live){
+    closeFileRequestState(live,closedAt);
+    live.updatedAt=closedAt;
+    saveDB(db);
+    await syncReferralNow(currentRef);
+  }
+  await purgeResolvedFileRequestCloud(currentRef);
+  broadcastReferral(currentRef,`Balasan instruksi RS untuk No. ${currentRef} telah dikirim.`);
   const status=document.getElementById('requestedReplyMessageStatus');
   if(status) status.textContent='';
   await renderRequestedReplyFile(currentRef);
@@ -2296,22 +2385,16 @@ async function renderRequestedReplyFile(no){
   try{
     if(cloudStatus) cloudStatus.textContent='☁ Memuat permintaan dan balasan dari Supabase...';
     db=loadDB();
-    let item=no ? db.referrals.find(x=>String(x.no)===String(no)) : null;
-    // Puskesmas tetap melihat permintaan terbaru meskipun surat tersebut belum sedang dipilih.
-    if(!item && getRoleNotificationParty()==='sender'){
-      item=(db.referrals||[])
-        .filter(x=>x.fileRequest?.name && x.fileRequest?.createdAt)
-        .sort((a,b)=>new Date(b.fileRequest.createdAt)-new Date(a.fileRequest.createdAt))[0] || null;
-      if(item && !currentRef){
-        currentRef=item.no;
-        displayRef(currentRef);
-      }
-    }
+    const item=no ? db.referrals.find(x=>String(x.no)===String(no)) : null;
+    // Tidak boleh mengambil instruksi dari rujukan lain ketika nomor baru
+    // belum dipilih. Instruksi hanya milik nomor surat yang sedang aktif.
     if(!item || !item.fileRequest?.name){
-      el.innerHTML='<div class="help">Belum ada file yang diunggah untuk permintaan ini.</div>';
-      if(notice) notice.innerHTML='Belum ada permintaan file dari RS.';
-      if(cloudStatus) cloudStatus.textContent='☁ Menunggu permintaan dari Supabase.';
+      el.innerHTML='<div class="help">Tidak ada instruksi RS yang aktif pada nomor ini.</div>';
+      if(notice) notice.innerHTML='Tidak ada instruksi RS yang aktif.';
+      if(cloudStatus) cloudStatus.textContent=no?'☁ Tidak ada instruksi aktif untuk nomor ini.':'☁ Menunggu instruksi dari RS.';
       if(btn) btn.disabled=true;
+      const replyBox=document.getElementById('requestedReplyMessage');
+      if(replyBox) replyBox.value='';
       return;
     }
     const req=item.fileRequest;
@@ -3779,6 +3862,10 @@ function newReferral(){
   renderList();
   renderAttachments("");
   resetDeferredAttachmentViews("");
+  const requestedReplyInput=document.getElementById("requestedReplyMessage");
+  if(requestedReplyInput) requestedReplyInput.value="";
+  const requestedReplyStatus=document.getElementById("requestedReplyMessageStatus");
+  if(requestedReplyStatus) requestedReplyStatus.textContent="";
   renderRequestedReplyFile("");
   syncDoctorDisplay();
   renderCurrentStatus();
@@ -3812,6 +3899,7 @@ async function saveReferral(){
 }
 function loadReferralRecord(no){
   db=loadDB(); const x=db.referrals.find(r=>r.no===no); if(!x) return;
+  if(sanitizeResolvedFileRequestState(x)) { x.updatedAt=new Date().toISOString(); saveDB(db); }
   currentRef=no; displayRef(no); fill(refFields,x);
   fill(ansFields,x.answer||{});
   syncAnswerDoctorDisplay();
@@ -4075,6 +4163,7 @@ async function confirmFileRequest(){
   old.answer={...(old.answer||{}),statusText:"RS mengirim permintaan file",message:request};
   old.answered=false;
   old.status="request_file";
+  delete old.fileRequestResolvedAt;
   old.fileRequest={
     name:request, message:request, requestType:"message_or_file",
     createdAt:requestCreatedAt, requestedBy:old.answer.aDokter||"Dokter RS",
@@ -4184,7 +4273,7 @@ async function sendRequestedFileBack(){
   const idx=db.referrals.findIndex(x=>x.no===currentRef);
   if(idx<0){alert("Surat rujukan belum disimpan.");return;}
   const item=db.referrals[idx];
-  const req=item.fileRequest;
+  const req={...(item.fileRequest||{})};
   if(!req?.name){alert("Belum ada permintaan file dari RS.");return;}
   const file=await getAnswerFileAttachment(currentRef);
   if(!file){alert("Upload file yang diminta RS terlebih dahulu.");return;}
@@ -4224,6 +4313,18 @@ async function sendRequestedFileBack(){
     alert("File sudah tersimpan dan status tersinkron, tetapi notifikasi cloud belum terbentuk. "+(e?.message||""));
     return;
   }
+  // File kembali berhasil terkirim: tutup instruksi aktif dan hapus delivery
+  // instruksi lama agar tidak muncul kembali pada HP/perangkat lain.
+  db=loadDB();
+  const live=db.referrals.find(x=>x.no===currentRef);
+  if(live){
+    const closedAt=live.fileRequest?.sentAt||new Date().toISOString();
+    closeFileRequestState(live,closedAt);
+    live.updatedAt=closedAt;
+    saveDB(db);
+    await syncReferralNow(currentRef);
+  }
+  await purgeResolvedFileRequestCloud(currentRef);
   broadcastReferral(currentRef,`File balasan ${file.name} berhasil dikirim kembali.`);
   renderList();
   renderCurrentStatus();
