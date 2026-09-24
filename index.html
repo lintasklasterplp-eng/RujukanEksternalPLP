@@ -572,15 +572,27 @@ body.authenticated #loginGate{display:none!important}
           <select id="rFaskesTujuan"><option value="">Pilih fasilitas kesehatan</option><option>RSUD Dabo</option><option>Fasilitas Kesehatan Lain</option></select>
           <label>Jenis Rujukan</label>
           <select id="rJenisRujukan"><option value="">Pilih</option><option>Rujukan Gawat Darurat</option><option>Rujukan Terencana</option><option>Rujukan Antar Fasilitas</option></select>
-          <label>Prioritas</label>
-          <select id="rPrioritas"><option value="">Pilih</option><option>Emergency</option><option>Urgent</option><option>Normal</option></select>
-          <label>Kebutuhan Pelayanan</label><input id="rKebutuhan" placeholder="Contoh: UGD, rawat inap, spesialis">
-          <label>Transportasi</label>
-          <select id="rTransportasi"><option value="">Pilih</option><option>Ambulans</option><option>Kendaraan keluarga</option><option>Lainnya</option></select>
+          <label>GCS Saat Dirujuk</label>
+          <select id="rKondisiRujukan" aria-label="GCS Saat Dirujuk">
+            <option value="">Pilih GCS</option>
+            <option value="GCS 15">GCS 15</option>
+            <option value="GCS 14">GCS 14</option>
+            <option value="GCS 13">GCS 13</option>
+            <option value="GCS 12">GCS 12</option>
+            <option value="GCS 11">GCS 11</option>
+            <option value="GCS 10">GCS 10</option>
+            <option value="GCS 9">GCS 9</option>
+            <option value="GCS 8">GCS 8</option>
+            <option value="GCS 7">GCS 7</option>
+            <option value="GCS 6">GCS 6</option>
+            <option value="GCS 5">GCS 5</option>
+            <option value="GCS 4">GCS 4</option>
+            <option value="GCS 3">GCS 3</option>
+          </select>
         </div>
+        <div class="help" style="margin-top:6px">Kondisi neurologis saat dirujuk dicatat dalam nilai GCS (3–15).</div>
         <div class="form-grid" style="margin-top:8px">
           <label>Alasan Rujukan</label><textarea id="rAlasanRujukan" placeholder="Masukkan alasan klinis / kebutuhan rujukan"></textarea>
-          <label>Kondisi Saat Dirujuk</label><textarea id="rKondisiRujukan" placeholder="Kondisi pasien saat akan dirujuk"></textarea>
         </div>
       </div>
 
@@ -672,7 +684,7 @@ body.authenticated #loginGate{display:none!important}
       </div>
       <label for="requestedFileName">Permintaan / Pesan dari RS</label>
       <textarea id="requestedFileName" rows="4" placeholder="Contoh: Mohon kirim hasil laboratorium terbaru dan resume medis pasien. Atau tuliskan pesan/instruksi lain."></textarea>
-      <div class="help">Permintaan dapat berupa nama file, beberapa file sekaligus, atau chat/ketikan bebas. Isi ini akan diteruskan ke Form Surat Rujukan sebagai notifikasi.</div>
+      <div class="help">Permintaan dapat berupa nama file, beberapa file sekaligus, atau chat/ketikan bebas. Permintaan, notifikasi, dan status pengiriman akan disimpan di Supabase agar dapat dilihat dari perangkat lain.</div>
       <div class="file-request-actions">
         <button type="button" class="btn-secondary" id="btnCancelFileRequest">Batal</button>
         <button type="button" class="btn-ok" id="btnConfirmFileRequest">OK</button>
@@ -718,7 +730,6 @@ body.authenticated #loginGate{display:none!important}
           <label>Nama Fasilitas</label><input id="aFaskesPenerima" value="RSUD Dabo">
           <label>Waktu Respons</label><input id="aWaktuRespons" type="datetime-local" title="Terisi otomatis saat petugas mulai mengisi jawaban; masih dapat dikoreksi manual.">
         </div>
-        <div class="form-grid" style="margin-top:8px"><label>Catatan Respons</label><textarea id="aCatatanRespons" placeholder="Keterangan penerimaan, alasan penolakan, kebutuhan tambahan, atau instruksi berikutnya"></textarea></div>
       </div>
 
       <div class="form-grid">
@@ -2472,11 +2483,8 @@ function buildReferralPdfPaper(item,no){
     row('No. RM',val('rNoRM')),
     row('Fasilitas Tujuan',selectedText('rFaskesTujuan')),
     row('Jenis Rujukan',selectedText('rJenisRujukan')),
-    row('Prioritas',selectedText('rPrioritas')),
-    row('Kebutuhan Pelayanan',val('rKebutuhan')),
-    row('Transportasi',selectedText('rTransportasi')),
     row('Alasan Rujukan',val('rAlasanRujukan'),{full:true}),
-    row('Kondisi Saat Dirujuk',val('rKondisiRujukan'),{full:true})
+    row('GCS Saat Dirujuk',selectedText('rKondisiRujukan'),{full:true})
   ]); if(sRef.children.length>1) paper.appendChild(sRef);
 
   const sPatient=section('Identitas Pasien');
@@ -2769,8 +2777,8 @@ function fields(ids){
 function fill(ids,obj){
   ids.forEach(id=>{if(document.getElementById(id)) document.getElementById(id).value=obj?.[id]||"";});
 }
-const refFields=["rNama","rUsia","rJK","rPekerjaan","rWhatsApp","rAlamat","rPenanggungJawab","rNoHPPenanggungJawab","rKeluhan","rFisik","rLab","rRontgen","rEkg","rDx","rTerapi","rDokter","rNoRM","rFaskesTujuan","rJenisRujukan","rPrioritas","rKebutuhan","rTransportasi","rAlasanRujukan","rKondisiRujukan"];
-const ansFields=["aNoSurat","aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aWaktuRespons","aCatatanRespons"];
+const refFields=["rNama","rUsia","rJK","rPekerjaan","rWhatsApp","rAlamat","rPenanggungJawab","rNoHPPenanggungJawab","rKeluhan","rFisik","rLab","rRontgen","rEkg","rDx","rTerapi","rDokter","rNoRM","rFaskesTujuan","rJenisRujukan","rAlasanRujukan","rKondisiRujukan"];
+const ansFields=["aNoSurat","aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aWaktuRespons"];
 
 function syncDoctorDisplay(){
   const v=document.getElementById("rDokter")?.value||"";
@@ -3214,7 +3222,7 @@ function ensureAnswerResponseStarted(item=null){
 }
 function maybeStartAnswerResponse(){
   if(!currentRef) return;
-  const triggerIds=["aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aCatatanRespons"];
+  const triggerIds=["aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima"];
   const any=triggerIds.some(id=>String(document.getElementById(id)?.value||"").trim()!=="");
   if(!any) return;
   db=loadDB();
@@ -3522,7 +3530,6 @@ async function rejectReferral(){
   old.answer={...(old.answer||{}),...fields(ansFields),statusText:"Tidak Dapat Menerima",message:reason||"Fasilitas penerima tidak dapat menerima rujukan.",rejectedAt:new Date().toISOString()};
   old.answered=true; old.status="rejected";
   old.aStatusRujukan="ditolak";
-  old.aCatatanRespons=reason||old.aCatatanRespons||"";
   old.updatedAt=new Date().toISOString();
   addPartyNotification(old,"sender",`Fasilitas penerima tidak dapat menerima rujukan. Alasan: ${reason||"-"}`,"warn");
   addPartyNotification(old,"receiver","Status tidak dapat menerima berhasil dicatat.","warn");
@@ -3633,7 +3640,6 @@ function shareCurrentReferralWhatsApp(){
     "No: "+item.no,
     "Pasien: "+(item.rNama||"-"),
     "Faskes tujuan: "+(item.rFaskesTujuan||"-"),
-    "Prioritas: "+(item.rPrioritas||"-"),
     "Diagnosis: "+(item.rDx||"-"),
     "Status: "+statusLabel(item.status)
   ].join("\n");
