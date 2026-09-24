@@ -799,30 +799,137 @@ const STAMP_KEY="puskesmas_lanjut_stempel_v1";
 const WA_SETTINGS_KEY="puskesmas_lanjut_wa_settings_v1";
 const RECEIVER_HIDE_KEY="puskesmas_lanjut_receiver_hidden_v1";
 const ACCOUNTS_KEY="puskesmas_lanjut_accounts_v1";
+const ACCOUNTS_CLOUD_PATH="accounts/users.json";
 const ADMIN_RESET_PASSWORD="admin";
+let accountsCloudReady=false;
+let accountsCloudBusy=false;
 
+function seedAccounts(){
+  const now=new Date().toISOString();
+  return [
+    {id:"admin",name:"Administrator",username:"admin (admin)",password:"admin",role:"Admin",createdAt:now},
+    {id:"puskesmas",name:"Petugas UPTD Puskesmas Lanjut",username:"petugas (Puskesmas Lanjut)",password:"puskesmas123",role:"Puskesmas Lanjut",createdAt:now},
+    {id:"rsud",name:"Petugas RSUD Dabo",username:"petugas (RSUD Dabo)",password:"rsud123",role:"RSUD Dabo",createdAt:now}
+  ];
+}
 function loadAccounts(){
   try{
     const raw=JSON.parse(localStorage.getItem(ACCOUNTS_KEY));
     if(Array.isArray(raw) && raw.length) return raw;
   }catch(e){}
-  const now=new Date().toISOString();
-  const seed=[
-    {id:"admin",name:"Administrator",username:"admin (admin)",password:"admin",role:"Admin",createdAt:now},
-    {id:"puskesmas",name:"Petugas UPTD Puskesmas Lanjut",username:"petugas (Puskesmas Lanjut)",password:"puskesmas123",role:"Puskesmas Lanjut",createdAt:now},
-    {id:"rsud",name:"Petugas RSUD Dabo",username:"petugas (RSUD Dabo)",password:"rsud123",role:"RSUD Dabo",createdAt:now}
-  ];
+  const seed=seedAccounts();
   localStorage.setItem(ACCOUNTS_KEY,JSON.stringify(seed));
   return seed;
 }
-function saveAccounts(list){ localStorage.setItem(ACCOUNTS_KEY,JSON.stringify(list)); }
+function saveAccounts(list){ localStorage.setItem(ACCOUNTS_KEY,JSON.stringify(Array.isArray(list)?list:[])); }
 function escText(v){return String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));}
-function renderAccountList(){
+async function hashAccountPassword(password){
+  const value=String(password??"");
+  if(window.crypto?.subtle){
+    const data=new TextEncoder().encode(value);
+    const digest=await crypto.subtle.digest("SHA-256",data);
+    return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,"0")).join("");
+  }
+  // Fallback agar browser lama tetap dapat bekerja; password lama tetap dapat diverifikasi.
+  return "plain:"+value;
+}
+async function normalizeAccountRecord(account){
+  const a={...(account||{})};
+  if(!a.id) a.id="u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
+  a.username=String(a.username||"").trim().toLowerCase();
+  a.name=String(a.name||"").trim();
+  a.role=String(a.role||"Petugas");
+  a.createdAt=a.createdAt||new Date().toISOString();
+  if(!a.passwordHash && Object.prototype.hasOwnProperty.call(a,"password")){
+    a.passwordHash=await hashAccountPassword(a.password);
+  }
+  delete a.password;
+  return a;
+}
+async function normalizeAccounts(list){
+  const out=[];
+  for(const a of (Array.isArray(list)?list:[])) out.push(await normalizeAccountRecord(a));
+  return out;
+}
+async function fetchAccountsFromBucket(){
+  try{
+    const data=await cloudDownloadJson(ACCOUNTS_CLOUD_PATH);
+    if(Array.isArray(data?.accounts)) return data.accounts;
+    if(Array.isArray(data)) return data;
+    return null;
+  }catch(err){
+    const msg=String(err?.message||err||"");
+    if(/404|not found|empty|does not exist/i.test(msg)) return null;
+    throw err;
+  }
+}
+async function saveAccountsToBucket(list){
+  const normalized=await normalizeAccounts(list);
+  const payload={
+    version:2,
+    type:"shared_application_accounts",
+    bucket:"rujukan_eksternal",
+    updatedAt:new Date().toISOString(),
+    accounts:normalized
+  };
+  await cloudUpload(ACCOUNTS_CLOUD_PATH,JSON.stringify(payload),"application/json");
+  saveAccounts(normalized);
+  accountsCloudReady=true;
+  return normalized;
+}
+async function syncAccountsFromBucket({createIfMissing=true}={}){
+  if(accountsCloudBusy){
+    while(accountsCloudBusy) await new Promise(r=>setTimeout(r,50));
+    return loadAccounts();
+  }
+  accountsCloudBusy=true;
+  try{
+    let remote=null;
+    try{remote=await fetchAccountsFromBucket();}catch(err){
+      console.warn("Sinkronisasi akun Supabase gagal:",err);
+      accountsCloudReady=false;
+      return loadAccounts();
+    }
+    if(Array.isArray(remote) && remote.length){
+      const normalized=await normalizeAccounts(remote);
+      saveAccounts(normalized);
+      // Pastikan format/hash lama langsung dibakukan di cloud.
+      const needsRewrite=remote.some(a=>!a?.passwordHash);
+      if(needsRewrite && createIfMissing){
+        try{await saveAccountsToBucket(normalized);}catch(e){console.warn("Normalisasi akun ke Supabase gagal:",e);}
+      }
+      accountsCloudReady=true;
+      return normalized;
+    }
+    const local=loadAccounts();
+    const normalized=await normalizeAccounts(local);
+    if(createIfMissing){
+      try{
+        await saveAccountsToBucket(normalized);
+        return normalized;
+      }catch(err){
+        console.warn("Pembuatan data akun awal di Supabase gagal:",err);
+      }
+    }
+    saveAccounts(normalized);
+    accountsCloudReady=false;
+    return normalized;
+  }finally{accountsCloudBusy=false;}
+}
+async function accountPasswordMatches(account,password){
+  if(account?.passwordHash){
+    const h=await hashAccountPassword(password);
+    return h===String(account.passwordHash);
+  }
+  return String(account?.password||"")===String(password||"");
+}
+async function renderAccountList(){
   const box=document.getElementById("accountListBox");
   if(!box) return;
-  const rows=loadAccounts();
+  const rows=await syncAccountsFromBucket({createIfMissing:true});
   box.innerHTML=`
     <div style="margin-top:14px;font-weight:800;font-size:12px">Akun Terdaftar (${rows.length})</div>
+    <div class="help" style="margin-top:4px">Akun disimpan bersama di bucket <b>rujukan_eksternal</b> pada <code>accounts/users.json</code>, sehingga dapat digunakan dari perangkat lain.</div>
     <table class="account-table">
       <thead><tr><th>Nama</th><th>Username</th><th>Peran</th><th>Aksi</th></tr></thead>
       <tbody>
@@ -832,20 +939,26 @@ function renderAccountList(){
             <td><b>${escText(a.username)}</b></td>
             <td><span class="account-badge ${a.role==="Admin"?"admin":""}">${escText(a.role)}</span></td>
             <td><div class="account-actions">
-              ${a.username!=="admin"?`<button type="button" class="btn-danger small-btn" onclick="deleteManagedAccount('${encodeURIComponent(a.id)}')">Hapus</button>`:'<span class="help">Akun utama</span>'}
+              ${a.username!=="admin (admin)"?`<button type="button" class="btn-danger small-btn" onclick="deleteManagedAccount('${encodeURIComponent(a.id)}')">Hapus</button>`:'<span class="help">Akun utama</span>'}
             </div></td>
           </tr>`).join("")}
       </tbody>
     </table>`;
 }
-function deleteManagedAccount(encodedId){
+async function deleteManagedAccount(encodedId){
   const id=decodeURIComponent(encodedId);
-  const list=loadAccounts();
+  const list=await syncAccountsFromBucket({createIfMissing:true});
   const item=list.find(a=>a.id===id);
-  if(!item || item.username==="admin") { alert("Akun utama admin tidak dapat dihapus."); return; }
+  if(!item || item.username==="admin (admin)") { alert("Akun utama admin tidak dapat dihapus."); return; }
   if(!confirm(`Hapus akun ${item.username}?`)) return;
-  saveAccounts(list.filter(a=>a.id!==id));
-  renderAccountList();
+  try{
+    await saveAccountsToBucket(list.filter(a=>a.id!==id));
+    await renderAccountList();
+    alert(`Akun ${item.username} berhasil dihapus dari semua perangkat.`);
+  }catch(err){
+    console.error("Penghapusan akun cloud gagal",err);
+    alert("Akun belum dihapus dari Supabase. Periksa koneksi/bucket rujukan_eksternal lalu coba lagi.");
+  }
 }
 window.deleteManagedAccount=deleteManagedAccount;
 
@@ -858,28 +971,37 @@ function unlockAccountSettings(){
   }
   document.getElementById("adminGate").hidden=true;
   document.getElementById("accountManager").hidden=false;
-  renderAccountList();
+  renderAccountList().catch(err=>{
+    console.error(err);
+    alert("Daftar user belum dapat dimuat dari Supabase.");
+  });
 }
-function createManagedAccount(){
+async function createManagedAccount(){
   const name=document.getElementById("newAccountName")?.value.trim()||"";
   const role=document.getElementById("newAccountRole")?.value||"Petugas";
   const username=document.getElementById("newAccountUsername")?.value.trim().toLowerCase()||"";
   const password=document.getElementById("newAccountPassword")?.value||"";
   if(!name||!username||!password){alert("Lengkapi nama, username, dan password.");return;}
   if(password.length<4){alert("Password minimal 4 karakter.");return;}
-  const suffixMap={"Puskesmas Lanjut":" (Puskesmas Lanjut)","RSUD Dabo":" (RSUD Dabo)","Admin":" (admin)"};
+  const suffixMap={"Puskesmas Lanjut":" (puskesmas lanjut)","RSUD Dabo":" (rsud dabo)","Admin":" (admin)"};
   const expected=suffixMap[role]||"";
-  if(expected && !username.toLowerCase().endsWith(expected.toLowerCase())){
-    alert(`Username harus diakhiri dengan ${expected}.`);
+  if(expected && !username.toLowerCase().endsWith(expected)){
+    alert(`Username harus diakhiri dengan ${expected.replace(/[()]/g,'')}.`);
     return;
   }
-  const list=loadAccounts();
-  if(list.some(a=>a.username===username)){alert("Username sudah digunakan.");return;}
-  list.push({id:"u_"+Date.now(),name,username,password,role,createdAt:new Date().toISOString()});
-  saveAccounts(list);
-  ["newAccountName","newAccountUsername","newAccountPassword"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});
-  renderAccountList();
-  alert(`Akun ${username} berhasil dibuat.`);
+  try{
+    const list=await syncAccountsFromBucket({createIfMissing:true});
+    if(list.some(a=>String(a.username||"").toLowerCase()===username)){alert("Username sudah digunakan.");return;}
+    const account={id:"u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8),name,username,role,createdAt:new Date().toISOString(),passwordHash:await hashAccountPassword(password)};
+    list.push(account);
+    await saveAccountsToBucket(list);
+    ["newAccountName","newAccountUsername","newAccountPassword"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});
+    await renderAccountList();
+    alert(`Akun ${username} berhasil dibuat dan dapat dipakai di perangkat lain.`);
+  }catch(err){
+    console.error("Pembuatan akun cloud gagal",err);
+    alert("Akun belum dibuat. Pastikan bucket rujukan_eksternal dapat ditulisi oleh aplikasi.");
+  }
 }
 
 
@@ -985,11 +1107,19 @@ function applyRoleAccess(mode){
     ["btnHeaderSettings"].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display="inline-flex";});
   }
 }
-function performLogin(username,password){
+async function performLogin(username,password){
   const normalized=String(username||"").trim().toLowerCase();
-  const accounts=loadAccounts();
-  const account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized && String(a.password||"")===String(password||""));
-  if(!account) return {ok:false,message:"Username atau password salah."};
+  let accounts=await syncAccountsFromBucket({createIfMissing:true});
+  let account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized);
+  if(account && !(await accountPasswordMatches(account,password))){
+    return {ok:false,message:"Username atau password salah."};
+  }
+  if(!account){
+    // Satu kali fallback ke cache lokal jika koneksi cloud sedang bermasalah.
+    accounts=loadAccounts();
+    account=accounts.find(a=>String(a.username||"").trim().toLowerCase()===normalized);
+    if(!account || !(await accountPasswordMatches(account,password))) return {ok:false,message:"Username atau password salah."};
+  }
   const mode=loginModeFromUsername(account.username);
   if(!mode) return {ok:false,message:"Akun belum memiliki akhiran yang valid. Gunakan (Puskesmas Lanjut), (RSUD Dabo), atau (admin)."};
   const session={id:account.id,username:account.username,name:account.name,role:account.role,mode,loginAt:new Date().toISOString()};
@@ -1038,12 +1168,12 @@ function initLoginGate(){
   const userEl=document.getElementById("loginUsername");
   const passEl=document.getElementById("loginPassword");
   const rememberEl=document.getElementById("rememberPassword");
-  form?.addEventListener("submit",e=>{
+  form?.addEventListener("submit",async e=>{
     e.preventDefault();
     setLoginError("");
     const username=userEl?.value||"";
     const password=passEl?.value||"";
-    const result=performLogin(username,password);
+    const result=await performLogin(username,password);
     if(!result.ok){setLoginError(result.message);return;}
     if(rememberEl?.checked){
       localStorage.setItem(LOGIN_REMEMBER_KEY,JSON.stringify({username:String(username).trim(),password:String(password)}));
