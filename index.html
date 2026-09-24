@@ -515,7 +515,7 @@ body.authenticated #loginGate{display:none!important}
         <p class="help" style="margin:0">Pantau perjalanan rujukan dari pengiriman sampai jawaban, tindak lanjut, dan pengarsipan.</p>
         <div class="dashboard-tools no-print">
           <input id="dashboardSearch" placeholder="Cari nomor rujukan, nama pasien, diagnosis...">
-          <select id="dashboardFilter"><option value="all">Semua status</option><option value="sent">Terkirim</option><option value="received">Diterima</option><option value="processing">Diproses</option><option value="acc">ACC</option><option value="rejected">Ditolak</option><option value="completed">Selesai</option></select>
+          <select id="dashboardFilter"><option value="all">Semua status</option><option value="sent">Terkirim</option><option value="received">Diterima</option><option value="processing">Diproses</option><option value="acc">ACC</option><option value="rejected">Ditolak</option><option value="answer_received">Jawaban Diterima</option><option value="completed">Selesai</option></select>
         </div>
       </div>
       <div class="ref-workflow">
@@ -653,6 +653,20 @@ body.authenticated #loginGate{display:none!important}
         <input id="requestedFileUpload" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,.xls,.xlsx,.txt">
         <div class="help">Upload file yang diminta RS. Setelah file siap, klik <b>Kirim Kembali</b>.</div>
         <div id="requestedReplyList" class="attachment-list" hidden></div>
+      </div>
+
+      <div class="saved-box no-print" id="referralFinishBox" data-role-only="referral" style="display:none;margin-top:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <b>JAWABAN RUJUKAN DARI RSUD</b>
+          <span class="pdf-badge">PDF</span>
+        </div>
+        <div id="referralFinishNotice" class="help" style="margin-top:6px">
+          Jawaban PDF dari RSUD belum diterima.
+        </div>
+        <div style="display:flex;gap:7px;flex-wrap:wrap;margin-top:8px">
+          <button type="button" class="btn-ok" id="btnFinishReferral" disabled>✓ Selesai</button>
+          <button type="button" class="btn-secondary" id="btnOpenReturnedAnswer">Buka Arsip Rujukan Balik</button>
+        </div>
       </div>
 
       <div class="sig-grid">
@@ -1109,7 +1123,7 @@ function applyRoleAccess(mode){
   switchTab(active);
 
   // Pulihkan tampilan tombol yang diatur role sebelum menerapkan hak akses mode aktif.
-  ["btnBackToRef","btnAccReferral","btnRejectReferral","btnSaveAnswer","btnSendAnswerBack","btnRequestFile","btnPrintAnswer",
+  ["btnBackToRef","btnAccReferral","btnRejectReferral","btnSaveAnswer","btnSendAnswerBack","btnRequestFile","btnPrintAnswer","btnFinishReferral","btnOpenReturnedAnswer",
    "btnNew","btnSaveRef","btnSendWhatsApp","btnSendRequestedFile","btnPrintRef","btnArchive","btnAnswerArchive","btnReset"].forEach(id=>{
     const el=document.getElementById(id); if(el) el.style.display="";
   });
@@ -1124,6 +1138,7 @@ function applyRoleAccess(mode){
     // Admin hanya melihat dashboard dan menu pengaturan.
     ["btnHeaderSettings"].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display="inline-flex";});
   }
+  updateReferralCompletionButton();
 }
 async function performLogin(username,password){
   const normalized=String(username||"").trim().toLowerCase();
@@ -1230,67 +1245,31 @@ async function listDirectPrefixForReset(bucket,prefix){
 async function resetReferralSequenceCloud(y){
   const yearNum=Number(y);
   const bucket='rujukan_eksternal';
-  const paths=new Set();
-  const matchingNos=new Set();
-
-  // Record rujukan tahun berjalan adalah sumber utama nomor cloud.
+  // Reset Nomor hanya boleh dilakukan jika tidak ada record operasional tahun berjalan.
+  // Penghapusan satu nomor tetap menggunakan tombol Hapus Nomor.
   const recordRows=await listDirectPrefixForReset(bucket,SUPABASE_RECORD_PREFIX);
-  for(const row of recordRows){
+  const activeNos=[];
+  for(const row of (recordRows||[])){
     const name=String(row?.name||'').trim();
     if(!name.endsWith('.json')) continue;
-    const path=`${SUPABASE_RECORD_PREFIX}/${name}`;
     try{
-      const item=await cloudDownloadJson(path);
-      if(referralYearFromNo(item?.no)===yearNum){
-        const no=String(item.no); matchingNos.add(no); paths.add(path);
-      }
+      const item=await cloudDownloadJson(`${SUPABASE_RECORD_PREFIX}/${name}`);
+      if(referralYearFromNo(item?.no)===yearNum && !item?.deleted) activeNos.push(String(item.no));
     }catch(e){}
   }
-
-  // Hapus PDF dan notifikasi yang terkait langsung dengan nomor lama.
-  for(const no of matchingNos){
-    const safe=cloudSafeNo(no);
-    [
-      `${SUPABASE_PDF_PREFIX}/ref/${safe}.pdf`,
-      `${SUPABASE_PDF_PREFIX}/answer/${safe}.pdf`,
-      `${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${safe}.json`
-    ].forEach(x=>paths.add(x));
+  if(activeNos.length){
+    throw new Error(`Reset Nomor tidak dijalankan karena masih ada ${activeNos.length} nomor tahun ${yearNum} di penyimpanan. Gunakan Hapus Nomor pada rujukan yang sudah selesai terlebih dahulu, lalu ulangi Reset Nomor.`);
   }
 
-  // Hapus semua lampiran/metadata serta notifikasi event yang menunjuk ke nomor lama.
-  for(const prefix of [`${SUPABASE_ATTACHMENT_PREFIX}/`,`${SUPABASE_ATTACHMENT_META_PREFIX}/`,`${SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX}/`,`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/`]){
-    const rows=await listDirectPrefixForReset(bucket,prefix);
-    for(const row of rows){
-      const name=String(row?.name||'').trim();
-      if(!name) continue;
-      const full=`${prefix}${name}`;
-      if(prefix.startsWith(SUPABASE_ATTACHMENT_PREFIX+'/') || prefix.startsWith(SUPABASE_ATTACHMENT_META_PREFIX+'/')){
-        const safePart=full.split('/')[1]||'';
-        const noCandidate=String(safePart).replace(/_/g,'/');
-        const matches=[...matchingNos].some(no=>cloudSafeNo(no)===safePart);
-        if(matches) paths.add(full);
-      }else{
-        try{
-          const payload=await cloudDownloadJson(full);
-          if(referralYearFromNo(payload?.no)===yearNum) paths.add(full);
-        }catch(e){}
-      }
-    }
-  }
-
-  // Hapus semua lock angka tahun berjalan. RESET.json dibuat setelahnya sebagai penanda
-  // agar perangkat lain juga membuang cache nomor lama saat sinkronisasi.
   const lockRows=await listDirectPrefixForReset(bucket,`sequences/${yearNum}/`);
-  for(const row of lockRows){
+  const paths=(lockRows||[]).map(row=>{
     const name=String(row?.name||'').trim();
-    if(name) paths.add(`sequences/${yearNum}/${name}`);
-  }
+    return name?`sequences/${yearNum}/${name}`:"";
+  }).filter(Boolean);
 
-  // Hapus dalam batch kecil agar tidak terlalu besar untuk Storage API.
-  const all=[...paths];
-  for(let i=0;i<all.length;i+=100){
-    const batch=all.slice(i,i+100);
-    if(batch.length){
+  if(paths.length){
+    for(let i=0;i<paths.length;i+=100){
+      const batch=paths.slice(i,i+100);
       const r=await directStorageDelete(bucket,batch);
       if(!r.ok && r.status!==404) throw new Error(cloudErr(r.status,r.text));
     }
@@ -1301,15 +1280,15 @@ async function resetReferralSequenceCloud(y){
     year:yearNum,
     resetAt:new Date().toISOString(),
     resetTo:1,
-    note:'Nomor surat tahun ini direset ke 001. Record lama tahun berjalan telah dihapus dari penyimpanan operasional.'
+    note:'Counter nomor surat direset. Tidak ada record rujukan tahun berjalan yang boleh tersisa saat reset.'
   };
   await cloudUpload(`sequences/${yearNum}/RESET.json`,JSON.stringify(marker),'application/json');
-  return {year:yearNum,deletedObjects:all.length,deletedNumbers:[...matchingNos]};
+  return {year:yearNum,deletedObjects:paths.length,deletedNumbers:[]};
 }
 async function resetLocalReferralSequence(y){
   const yearNum=Number(y);
   db=loadDB();
-  db.referrals=(db.referrals||[]).filter(x=>referralYearFromNo(x.no)!==yearNum);
+  // Jangan menghapus record rujukan. Hanya reset counter lokal.
   db.seqByYear=db.seqByYear||{};
   db.seqByYear[yearNum]=0;
   saveDB(db);
@@ -1317,35 +1296,16 @@ async function resetLocalReferralSequence(y){
   localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+'receiver');
   localStorage.removeItem(NOTIFY_CLEARED_AT_PREFIX+'sender');
   localStorage.removeItem(NOTIFY_CLEARED_AT_PREFIX+'receiver');
-  try{
-    const idb=await openArchiveDB();
-    const stores=['pdfs','answerPdfs','attachments'];
-    await new Promise((resolve,reject)=>{
-      const tx=idb.transaction(stores,'readwrite');
-      for(const storeName of stores){
-        const store=tx.objectStore(storeName);
-        if(storeName==='attachments'){
-          const req=store.getAll();
-          req.onsuccess=()=>{ for(const x of req.result||[]){ if(referralYearFromNo(x.refNo)===yearNum) store.delete(x.id); } };
-        }else{
-          const req=store.getAll();
-          req.onsuccess=()=>{ for(const x of req.result||[]){ if(referralYearFromNo(x.no)===yearNum) store.delete(x.no); } };
-        }
-      }
-      tx.oncomplete=()=>{idb.close();resolve();};
-      tx.onerror=()=>{idb.close();reject(tx.error);};
-    });
-  }catch(e){ console.warn('Pembersihan arsip lokal saat reset nomor gagal:',e); }
 }
-async function resetReferralNumberCompletely(){
+async function resetReferralNumberSafely(){
   const y=year();
   const pass=prompt("Masukkan Password Administrator untuk Reset Nomor:");
   if(pass===null) return;
   if(pass!==ADMIN_RESET_PASSWORD){ alert("Password Administrator salah."); return; }
-  const yes=confirm(`RESET TOTAL NOMOR SURAT TAHUN ${y}?\n\nNomor akan kembali ke 001. Semua record, PDF, lampiran, dan notifikasi rujukan tahun ${y} akan dihapus dari penyimpanan operasional Supabase agar nomor 001 tidak bentrok dengan data lama. Arsip/data tahun lain tidak diubah.\n\nLanjutkan?`);
+  const yes=confirm(`Reset penghitung nomor surat tahun ${y} ke 001?\n\nFungsi ini BERBEDA dengan Hapus Nomor: Reset Nomor hanya mengatur ulang urutan nomor dan TIDAK menghapus surat, PDF, lampiran, atau arsip.\n\nAgar aman, reset hanya dapat dilakukan jika belum ada record operasional tahun ${y} di Supabase.\n\nLanjutkan?`);
   if(!yes) return;
   const btn=document.getElementById('btnReset');
-  if(btn){btn.disabled=true;btn.textContent='↺ Mereset...';}
+  if(btn){btn.disabled=true;btn.textContent='↺ Memeriksa...';}
   try{
     const result=await resetReferralSequenceCloud(y);
     await resetLocalReferralSequence(y);
@@ -1354,19 +1314,19 @@ async function resetReferralNumberCompletely(){
     fill(refFields,{});
     fill(ansFields,{});
     document.getElementById('aNoSurat').value='';
-    await renderArchives();
-    await renderAnswerArchives();
     renderList(); renderDashboard(); renderCurrentStatus(); renderGlobalIncomingNotification();
     renderAttachments(''); renderAnswerFile(''); renderIncomingReferralAttachments('');
-    alert(`Nomor surat tahun ${y} berhasil direset. Nomor rujukan berikutnya akan dimulai dari 001/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}.\n\n${result.deletedNumbers.length} nomor lama dihapus dari data operasional.`);
+    renderAnswerArchives();
+    alert(`Reset Nomor tahun ${y} berhasil. Nomor berikutnya akan dimulai dari 001/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}. Tidak ada data rujukan yang dihapus.`);
     newReferral();
   }catch(err){
-    console.error('Reset nomor total gagal:',err);
-    alert('Reset nomor gagal: '+(err?.message||String(err))+'\n\nTidak dilakukan reset sebagian agar nomor tidak menjadi tidak konsisten.');
+    console.error('Reset nomor gagal:',err);
+    alert('Reset nomor tidak dijalankan: '+(err?.message||String(err)));
   }finally{
     if(btn){btn.disabled=false;btn.textContent='↺ Reset Nomor';}
   }
 }
+
 function resetAllReferralData(){
   const pass=prompt("Masukkan Password Administrator untuk RESET DATA:");
   if(pass!==ADMIN_RESET_PASSWORD){ if(pass!==null) alert("Password Administrator salah."); return; }
@@ -1895,6 +1855,181 @@ function closeFileRequestState(item,when=Date.now()){
   delete item.fileRequest;
 }
 
+async function ensureAnswerReturnArchivedForSender(item,delivery){
+  if(!item?.no || !delivery?.pdfPath) return false;
+  try{
+    const existing=await findAnswerArchive(item.no);
+    if(existing) return true;
+    const blob=await cloudDownloadBlob(delivery.pdfPath,"pdf");
+    if(!blob) throw new Error("PDF jawaban tidak ditemukan di Supabase.");
+    await verifyPdfBlob(blob,"Arsip PDF rujukan balik");
+    const dataUrl=await blobToDataUrl(blob);
+    const filename=delivery.pdfFilename||item.answer?.pdfFilename||`Jawaban_Rujukan_${String(item.no).replaceAll('/','-')}.pdf`;
+    await putAnswerArchive({
+      no:item.no,
+      patient:item.rNama||item.answer?.aNama||"",
+      createdAt:delivery.sentAt||new Date().toISOString(),
+      filename,
+      dataUrl,
+      blob,
+      size:blob.size
+    });
+    return true;
+  }catch(e){
+    console.warn("Arsip rujukan balik otomatis belum terbentuk:",e);
+    return false;
+  }
+}
+
+async function purgeReferralOperationalNotifications(no){
+  const prefixes=[
+    SUPABASE_SENDER_NOTIFICATION_PREFIX,
+    SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX
+  ];
+  const targetNo=String(no||"").trim();
+  for(const prefix of prefixes){
+    try{
+      const rows=await cloudList(prefix);
+      const paths=[];
+      for(const row of (rows||[]).filter(x=>String(x.name||"").endsWith(".json"))){
+        const path=`${prefix}/${row.name}`;
+        try{
+          const delivery=await cloudDownloadJson(path);
+          if(String(delivery?.no||"")===targetNo) paths.push(path);
+        }catch(e){}
+      }
+      if(paths.length) await cloudDeleteMany(paths);
+    }catch(e){
+      console.warn("Pembersihan notifikasi operasional gagal:",prefix,e);
+    }
+  }
+  try{
+    const receiverPath=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(targetNo)}.json`;
+    await cloudDelete(receiverPath);
+  }catch(e){}
+}
+
+async function deleteAnswerFileForRef(no){
+  try{
+    const file=await getAnswerFileAttachment(no);
+    if(file) await deleteAttachment(file.id);
+  }catch(e){
+    console.warn("File upload balasan UPTD belum terhapus:",e);
+  }
+}
+
+async function finishReferralReceipt(){
+  const session=getSession();
+  if(session?.mode!=="referral"){
+    alert("Tombol Selesai hanya dapat digunakan oleh akun Puskesmas Lanjut.");
+    return;
+  }
+  if(!currentRef){
+    alert("Pilih nomor rujukan yang sudah menerima jawaban RSUD terlebih dahulu.");
+    return;
+  }
+  db=loadDB();
+  const idx=db.referrals.findIndex(x=>String(x.no)===String(currentRef));
+  if(idx<0){
+    alert("Nomor rujukan tidak ditemukan.");
+    return;
+  }
+  const item=db.referrals[idx];
+  const receivedAt=item.answer?.sentBackAt||item.answer?.receivedAt;
+  if(!receivedAt){
+    alert("Jawaban PDF dari RSUD belum tercatat sebagai terkirim.");
+    return;
+  }
+  if(String(item.status||"")==="completed"){
+    alert("Rujukan ini sudah berstatus Selesai.");
+    updateReferralCompletionButton();
+    return;
+  }
+  const archive=await findAnswerArchive(item.no).catch(()=>null);
+  if(!archive){
+    alert("Arsip Rujukan Balik belum tersedia. Sistem akan mencoba mengambil PDF jawaban dari Supabase terlebih dahulu.");
+    const ok=await ensureAnswerReturnArchivedForSender(item,{
+      pdfPath:item.answer?.pdfStoragePath,
+      pdfFilename:item.answer?.pdfFilename,
+      sentAt:receivedAt
+    });
+    if(!ok){
+      alert("PDF jawaban RSUD belum berhasil masuk Arsip Rujukan Balik. Selesaikan sinkronisasi terlebih dahulu.");
+      return;
+    }
+  }
+  const yes=confirm(`Tandai No. ${item.no} sebagai SELESAI?
+
+Setelah selesai:
+• notifikasi operasional rujukan ini akan dihapus;
+• file upload balasan UPTD (answer-file) akan dihapus;
+• catatan balasan atas instruksi akan dibersihkan dari record operasional;
+• Arsip Rujukan Balik PDF tetap dipertahankan.
+
+Lanjutkan?`);
+  if(!yes) return;
+
+  const now=new Date().toISOString();
+  item.status="completed";
+  item.answer=item.answer||{};
+  item.answer.receivedAt=receivedAt;
+  item.answer.finishedAt=now;
+  item.answer.statusText="Selesai";
+  item.answer.message="Jawaban rujukan RSUD telah diterima dan rujukan dinyatakan selesai oleh UPTD Puskesmas.";
+  item.requestedReplies=[];
+  closeFileRequestState(item,now);
+
+  // Hapus notifikasi dari tampilan lokal dan history operasional.
+  item.partyNotifications=item.partyNotifications||{sender:[],receiver:[]};
+  item.partyNotifications.sender=[];
+  item.notifications=(item.notifications||[]).filter(n=>n.party!=="sender");
+  item.updatedAt=now;
+  saveDB(db);
+
+  // Simpan perubahan status terlebih dahulu.
+  const synced=await syncReferralNow(currentRef);
+  if(!synced){
+    alert("Status Selesai belum dapat disinkronkan ke Supabase. Data lokal dipertahankan, tetapi pembersihan file/notifikasi belum dilakukan.");
+    return;
+  }
+
+  // Hapus file upload operasional dan semua delivery notifikasi terkait nomor ini.
+  await deleteAnswerFileForRef(currentRef);
+  await purgeReferralOperationalNotifications(currentRef);
+
+  renderRequestedReplyFile(currentRef);
+  renderAnswerFile(currentRef);
+  await renderAnswerArchives();
+  renderList();
+  renderDashboard();
+  renderCurrentStatus();
+  updateReferralCompletionButton();
+  alert(`No. ${currentRef} berhasil ditandai Selesai. Notifikasi operasional dan file upload balasan telah dibersihkan. Arsip Rujukan Balik PDF tetap tersimpan.`);
+}
+
+function updateReferralCompletionButton(){
+  const box=document.getElementById("referralFinishBox");
+  const btn=document.getElementById("btnFinishReferral");
+  const notice=document.getElementById("referralFinishNotice");
+  if(!box || !btn) return;
+  const session=getSession();
+  if(session?.mode!=="referral"){
+    box.style.display="none";
+    return;
+  }
+  db=loadDB();
+  const item=currentRef ? db.referrals.find(x=>String(x.no)===String(currentRef)) : null;
+  const alreadyDone=String(item?.status||"")==="completed";
+  const hasReturn=!!(item?.answer?.sentBackAt||item?.answer?.pdfStoragePath) && !alreadyDone;
+  box.style.display=hasReturn?"block":"none";
+  btn.disabled=!hasReturn;
+  if(notice){
+    notice.textContent=hasReturn
+      ? `Jawaban PDF No. ${item.no} sudah diterima. Arsip Rujukan Balik tersedia. Klik Selesai setelah memastikan jawaban RSUD benar-benar sudah masuk.`
+      : "Jawaban PDF dari RSUD belum diterima.";
+  }
+}
+
 async function hydrateSenderDeliveryNotifications(){
   try{
     let rows=await cloudList(SUPABASE_SENDER_NOTIFICATION_PREFIX);
@@ -1935,8 +2070,12 @@ async function hydrateSenderDeliveryNotifications(){
         if(delivery.pdfPath) item.answer.pdfStoragePath=delivery.pdfPath;
         if(delivery.pdfFilename) item.answer.pdfFilename=delivery.pdfFilename;
         item.answer.sentBackAt=delivery.sentAt||item.answer.sentBackAt;
-        item.answer.statusText="Sudah dikirim kembali";
-        item.status="completed";
+        item.answer.receivedAt=item.answer.receivedAt||delivery.sentAt||new Date().toISOString();
+        item.answer.statusText="Jawaban Diterima";
+        item.status=getRoleNotificationParty()==="sender" ? "answer_received" : "completed";
+        if(getRoleNotificationParty()==="sender"){
+          await ensureAnswerReturnArchivedForSender(item,delivery);
+        }
       }else if(delivery.type==="file_return"){
         const closedAt=delivery.sentAt||new Date().toISOString();
         item.status="file_sent";
@@ -1973,6 +2112,7 @@ async function hydrateSenderDeliveryNotifications(){
     }
   }catch(e){console.warn("Daftar delivery sender belum dapat dimuat",e);}
   renderGlobalIncomingNotification(); renderList(); renderCurrentStatus(); renderRoleNotificationCenter();
+  updateReferralCompletionButton();
   if(getRoleNotificationParty()==="sender") await renderRequestedReplyFile(currentRef);
 }
 async function uploadPdfToSupabase(no,blob,filename,kind,{publishRecord=true}={}){
@@ -3849,6 +3989,7 @@ function statusLabel(status){
     file_ready:"File balasan siap dikirim",
     file_sent:"File balasan sudah dikirim",
     answered:"Sudah dijawab",
+    answer_received:"Jawaban Diterima",
     acc:"Diterima / ACC",
     rejected:"Tidak dapat menerima",
     cancelled:"Dibatalkan",
@@ -3858,7 +3999,8 @@ function statusLabel(status){
   return map[status]||status||"Belum dikirim";
 }
 function computeReferralStage(status){
-  if(["completed","answered","file_sent"].includes(status)) return 6;
+  if(["completed"].includes(status)) return 7;
+  if(["answer_received","answered","file_sent"].includes(status)) return 6;
   if(["acc","rejected","info_required"].includes(status)) return 5;
   if(["processing","request_file","request_results"].includes(status)) return 4;
   if(status==="received") return 3;
@@ -3905,6 +4047,7 @@ function renderCurrentStatus(){
     aDetail.textContent=aNote;
   }
   renderGlobalIncomingNotification();
+  updateReferralCompletionButton();
 }
 function getCurrentReferral(){
   db=loadDB();
@@ -3959,6 +4102,7 @@ function newReferral(){
   updateSendAnswerButton();
   document.getElementById("rNama").focus();
   renderDashboard();
+  updateReferralCompletionButton();
   // Nomor hanya pratinjau dari cloud; belum dianggap terpakai sampai Simpan/Kirim.
   getNextReferralNumberCloud().then(no=>{
     if(!currentRef){ currentRef=no; displayRef(no); renderCurrentStatus(); }
@@ -4484,14 +4628,14 @@ async function renderDashboard(){
   const kpiAccepted=document.getElementById("kpiAccepted");
   const kpiDone=document.getElementById("kpiDone");
   if(kpiTotal) kpiTotal.textContent=refs.length;
-  if(kpiWaiting) kpiWaiting.textContent=by(x=>["sent","received","processing","request_file","request_results"].includes(x.status));
+  if(kpiWaiting) kpiWaiting.textContent=by(x=>["sent","received","processing","request_file","request_results","answer_received"].includes(x.status));
   if(kpiAccepted) kpiAccepted.textContent=by(x=>["acc","completed"].includes(x.status));
   if(kpiDone) kpiDone.textContent=by(x=>["completed","answered","file_sent"].includes(x.status));
   const el=document.getElementById("dashboardList");
   if(!el) return;
   if(!refs.length){el.innerHTML='<div class="help" style="padding:8px 0">Belum ada data rujukan.</div>';return;}
   el.innerHTML=refs.slice(0,12).map(x=>{
-    const isDone=['completed','answered','file_sent'].includes(String(x.status||''));
+    const isDone=['completed'].includes(String(x.status||''));
     return `<div class="saved-item" data-status="${escapeHtml(x.status||"saved")}"><div><b>${escapeHtml(x.no)}</b> <span class="facility-badge">${escapeHtml(x.rFaskesTujuan||"Faskes tujuan belum dipilih")}</span><br><span class="help">${escapeHtml(x.rNama||"Tanpa nama")} · ${escapeHtml(x.rDx||"Diagnosis belum diisi")}</span></div><div><span class="pill ${["rejected","cancelled"].includes(x.status)?"":(["acc","completed"].includes(x.status)?"":"pending")}">${escapeHtml(statusLabel(x.status))}</span><br><button class="btn-secondary" style="margin-top:5px" onclick="loadReferral('${encodeURIComponent(x.no)}')">Buka</button>${isDone?` <button class="btn-danger" style="margin-top:5px" title="Hapus satu nomor rujukan yang sudah selesai" onclick="deleteCompletedReferralNumber('${encodeURIComponent(x.no)}')">Hapus Nomor</button>`:''}</div></div>`;
   }).join("");
   applyDashboardFilters();
@@ -4501,7 +4645,7 @@ async function renderList(){
   const el=document.getElementById("refList"); db=loadDB();
   if(!el) return;
   const hidden=new Set(loadReceiverHidden());
-  const incoming=db.referrals.filter(x=>!hidden.has(x.no) && !x.deleted && ["sent","received","preparing","processing","request_file","request_results","acc","rejected","completed","file_sent"].includes(x.status||"sent"));
+  const incoming=db.referrals.filter(x=>!hidden.has(x.no) && !x.deleted && ["sent","received","preparing","processing","request_file","request_results","acc","rejected","answer_received","completed","file_sent"].includes(x.status||"sent"));
   if(!incoming.length){el.innerHTML="<div class='help' style='padding:8px 0'>Belum ada surat rujukan masuk.</div>";return;}
   let archiveNos=new Set();
   try{ archiveNos=new Set((await getArchives()).map(x=>x.no)); }catch(e){ console.warn("Arsip PDF belum dapat dibaca",e); }
@@ -4521,7 +4665,7 @@ async function renderList(){
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
         <span class="pill ${cls}">${escapeHtml(label)}</span>
         <button class="btn-secondary preview-btn" title="Pilih dan buka PDF surat rujukan dari Supabase" data-ref-action="preview" data-ref-no="${escapeHtml(x.no)}">Pilih</button>
-        ${['completed','answered','file_sent'].includes(String(x.status||''))
+        ${['completed'].includes(String(x.status||''))
           ? `<button class="btn-danger" title="Hapus satu nomor rujukan yang sudah selesai" onclick="deleteCompletedReferralNumber('${encodeURIComponent(x.no)}')">Hapus Nomor</button>`
           : `<button class="btn-delete-incoming" title="Hapus surat rujukan masuk" data-ref-action="delete" data-ref-no="${escapeHtml(x.no)}">Hapus</button>`}
       </div>
@@ -4679,7 +4823,12 @@ document.getElementById("btnResetAllData").onclick=resetAllReferralData;
 document.getElementById("adminSettingsPassword").addEventListener("keydown",e=>{if(e.key==="Enter") unlockAccountSettings();});
 
 document.getElementById("waSettingsModal").addEventListener("click",e=>{if(e.target.id==="waSettingsModal") closeWaSettings();});
-document.getElementById("btnReset").onclick=resetReferralNumberCompletely;
+document.getElementById("btnReset").onclick=resetReferralNumberSafely;
+document.getElementById("btnFinishReferral")?.addEventListener("click",finishReferralReceipt);
+document.getElementById("btnOpenReturnedAnswer")?.addEventListener("click",async()=>{
+  await renderAnswerArchives();
+  document.getElementById("answerArchiveBox")?.scrollIntoView({behavior:"smooth",block:"start"});
+});
 document.getElementById('btnLoadIncomingAttachments')?.addEventListener('click',async()=>{
   const btn=document.getElementById('btnLoadIncomingAttachments');
   const el=document.getElementById('incomingAttachmentList');
@@ -4719,6 +4868,7 @@ renderCurrentStatus();
 renderDashboard();
 syncAnswerDoctorDisplay();
 updateSendAnswerButton();
+updateReferralCompletionButton();
 initSupabaseRealtime().catch(()=>{});
 startSupabasePolling();
 hydrateSupabaseReferrals().catch(()=>{});
