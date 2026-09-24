@@ -3312,6 +3312,32 @@ window.removeArchive=async (encoded)=>{
   }
 };
 
+async function deleteCompletedReferralNumber(encoded){
+  let no='';
+  try{ no=decodeURIComponent(encoded); }catch(e){ no=String(encoded||''); }
+  no=String(no||'').trim();
+  if(!no) return;
+  db=loadDB();
+  const item=(db.referrals||[]).find(x=>String(x.no||'')===no);
+  if(!item){
+    alert('Nomor rujukan tidak ditemukan.');
+    return;
+  }
+  const terminal=['completed','answered','file_sent'].includes(String(item.status||''));
+  if(!terminal){
+    alert('Tombol Hapus Nomor hanya dapat digunakan untuk rujukan yang sudah selesai.');
+    return;
+  }
+  try{
+    const ok=await deleteReferralPermanently(no,{ask:true});
+    if(ok) alert(`Nomor rujukan ${no} berhasil dihapus permanen.`);
+  }catch(err){
+    console.error('Hapus nomor rujukan gagal',err);
+    alert('Nomor rujukan '+no+' gagal dihapus. Data tetap dipertahankan.');
+  }
+}
+window.deleteCompletedReferralNumber=deleteCompletedReferralNumber;
+
 let db=loadDB();
 let currentRef=null;
 
@@ -4464,7 +4490,10 @@ async function renderDashboard(){
   const el=document.getElementById("dashboardList");
   if(!el) return;
   if(!refs.length){el.innerHTML='<div class="help" style="padding:8px 0">Belum ada data rujukan.</div>';return;}
-  el.innerHTML=refs.slice(0,12).map(x=>`<div class="saved-item" data-status="${escapeHtml(x.status||"saved")}"><div><b>${escapeHtml(x.no)}</b> <span class="facility-badge">${escapeHtml(x.rFaskesTujuan||"Faskes tujuan belum dipilih")}</span><br><span class="help">${escapeHtml(x.rNama||"Tanpa nama")} · ${escapeHtml(x.rDx||"Diagnosis belum diisi")}</span></div><div><span class="pill ${["rejected","cancelled"].includes(x.status)?"":(["acc","completed"].includes(x.status)?"":"pending")}">${escapeHtml(statusLabel(x.status))}</span><br><button class="btn-secondary" style="margin-top:5px" onclick="loadReferral('${encodeURIComponent(x.no)}')">Buka</button></div></div>`).join("");
+  el.innerHTML=refs.slice(0,12).map(x=>{
+    const isDone=['completed','answered','file_sent'].includes(String(x.status||''));
+    return `<div class="saved-item" data-status="${escapeHtml(x.status||"saved")}"><div><b>${escapeHtml(x.no)}</b> <span class="facility-badge">${escapeHtml(x.rFaskesTujuan||"Faskes tujuan belum dipilih")}</span><br><span class="help">${escapeHtml(x.rNama||"Tanpa nama")} · ${escapeHtml(x.rDx||"Diagnosis belum diisi")}</span></div><div><span class="pill ${["rejected","cancelled"].includes(x.status)?"":(["acc","completed"].includes(x.status)?"":"pending")}">${escapeHtml(statusLabel(x.status))}</span><br><button class="btn-secondary" style="margin-top:5px" onclick="loadReferral('${encodeURIComponent(x.no)}')">Buka</button>${isDone?` <button class="btn-danger" style="margin-top:5px" title="Hapus satu nomor rujukan yang sudah selesai" onclick="deleteCompletedReferralNumber('${encodeURIComponent(x.no)}')">Hapus Nomor</button>`:''}</div></div>`;
+  }).join("");
   applyDashboardFilters();
 }
 
@@ -4492,7 +4521,9 @@ async function renderList(){
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
         <span class="pill ${cls}">${escapeHtml(label)}</span>
         <button class="btn-secondary preview-btn" title="Pilih dan buka PDF surat rujukan dari Supabase" data-ref-action="preview" data-ref-no="${escapeHtml(x.no)}">Pilih</button>
-        <button class="btn-delete-incoming" title="Hapus surat rujukan masuk" data-ref-action="delete" data-ref-no="${escapeHtml(x.no)}">Hapus</button>
+        ${['completed','answered','file_sent'].includes(String(x.status||''))
+          ? `<button class="btn-danger" title="Hapus satu nomor rujukan yang sudah selesai" onclick="deleteCompletedReferralNumber('${encodeURIComponent(x.no)}')">Hapus Nomor</button>`
+          : `<button class="btn-delete-incoming" title="Hapus surat rujukan masuk" data-ref-action="delete" data-ref-no="${escapeHtml(x.no)}">Hapus</button>`}
       </div>
     </div>`;
   }).join("");
