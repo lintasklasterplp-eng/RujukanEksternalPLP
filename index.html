@@ -2194,7 +2194,12 @@ async function hydrateSenderDeliveryNotifications(){
   }catch(e){console.warn("Daftar delivery sender belum dapat dimuat",e);}
   renderGlobalIncomingNotification(); renderList(); renderCurrentStatus(); renderRoleNotificationCenter();
   updateReferralCompletionButton();
-  if(getRoleNotificationParty()==="sender") await renderRequestedReplyFile(currentRef);
+  if(getRoleNotificationParty()==="sender"){
+    // Setelah delivery answer_return masuk, arsip PDF lokal harus langsung
+    // ditampilkan tanpa menunggu pengguna membuka menu Arsip secara manual.
+    await renderAnswerArchives();
+    await renderRequestedReplyFile(currentRef);
+  }
 }
 async function uploadPdfToSupabase(no,blob,filename,kind,{publishRecord=true}={}){
   await verifyPdfBlob(blob,kind==="answer"?"PDF Jawaban":"PDF Surat Rujukan");
