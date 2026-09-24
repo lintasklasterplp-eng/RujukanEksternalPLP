@@ -1509,6 +1509,7 @@ async function hydrateReceiverEventNotifications(){
           item.notifications=item.notifications||[];
           item.notifications.push({message,type:"info",createdAt,party:"receiver",deliveryPath});
         }
+        activateNotificationForNo(item.no,"receiver",createdAt);
         item.fileRequest=item.fileRequest||{};
         if(delivery.type==="request_reply" && delivery.responseMessage){ item.fileRequest.responseMessage=delivery.responseMessage; item.fileRequest.responseMessageAt=createdAt; }
         if(delivery.type==="file_ready" && delivery.fileName){ item.fileRequest.responseFileName=delivery.fileName; item.fileRequest.fileReadyAt=createdAt; }
@@ -1554,6 +1555,7 @@ async function hydrateSenderDeliveryNotifications(){
         item.notifications=item.notifications||[];
         item.notifications.push({message,type:"info",createdAt:delivery.sentAt||new Date().toISOString(),party:"sender",deliveryPath});
       }
+      activateNotificationForNo(item.no,"sender",delivery.sentAt||new Date().toISOString());
       if(delivery.type==="answer_return"){
         item.answer=item.answer||{};
         if(delivery.pdfPath) item.answer.pdfStoragePath=delivery.pdfPath;
@@ -1660,6 +1662,7 @@ async function hydrateReceiverDeliveryNotifications(){
         const message=delivery.notification||"Rujukan baru masuk dan menunggu diproses.";
         const exists=item.partyNotifications.receiver.some(n=>String(n.message||"")===message && String(n.deliveryPath||"")===deliveryPath);
         if(!exists)item.partyNotifications.receiver.push({message,type:"info",createdAt:delivery.sentAt||new Date().toISOString(),deliveryPath});
+         activateNotificationForNo(item.no,"receiver",delivery.sentAt||new Date().toISOString());
         saveDB(db);
       }catch(e){console.warn("Delivery notification gagal dimuat",row.name,e);}
     }
@@ -2841,6 +2844,7 @@ let currentRef=null;
 
 async function getCloudMaxReferralSequence(y){
   let maxNo=0;
+  const yearNum=Number(y);
   try{
     const rows=await cloudList(SUPABASE_RECORD_PREFIX);
     for(const row of (rows||[])){
@@ -2848,23 +2852,64 @@ async function getCloudMaxReferralSequence(y){
       if(!name.endsWith('.json')) continue;
       const stem=name.replace(/\.json$/i,'');
       const m=stem.match(/^(\d+)_PKM-TU_[IVX]+_(\d{4})$/i);
-      if(m && Number(m[2])===Number(y)) maxNo=Math.max(maxNo,Number(m[1]||0));
-    }
-    // Fallback bila listing Storage tidak memberikan nama file yang lengkap.
-    if(maxNo===0){
-      const remote=await cloudList(SUPABASE_RECORD_PREFIX);
-      for(const row of (remote||[])){
-        const name=String(row?.name||'');
-        const m=name.match(/^(\d+)[_-]PKM-TU[_-][IVX]+[_-](\d{4})/i);
-        if(m && Number(m[2])===Number(y)) maxNo=Math.max(maxNo,Number(m[1]||0));
+      if(m && Number(m[2])===yearNum) maxNo=Math.max(maxNo,Number(m[1]||0));
+      // Nama file lama/format berbeda tidak boleh membuat nomor mundur.
+      if(!m){
+        try{
+          const x=await cloudDownloadJson(`${SUPABASE_RECORD_PREFIX}/${name}`);
+          const rm=String(x?.no||"").match(/^(\d+)\/PKM-TU\/[IVX]+\/(\d{4})$/i);
+          if(rm && Number(rm[2])===yearNum) maxNo=Math.max(maxNo,Number(rm[1]||0));
+        }catch(e){}
       }
+    }
+    // Lock sequence dipakai untuk mencegah dua perangkat mengambil nomor yang sama.
+    const lockRows=await cloudList(`sequences/${yearNum}`);
+    for(const row of (lockRows||[])){
+      const m=String(row?.name||"").match(/^(\d{4})\.lock$/i);
+      if(m) maxNo=Math.max(maxNo,Number(m[1]));
     }
   }catch(e){
     console.warn('Nomor cloud belum dapat dibaca:',e);
   }
   return maxNo;
 }
+async function reserveReferralSequenceCloud(y){
+  const yearNum=Number(y);
+  db=loadDB();
+  let candidate=Math.max(Number(db.seqByYear?.[yearNum]||0),await getCloudMaxReferralSequence(yearNum))+1;
+  // Coba membuat objek lock tanpa upsert. Jika sudah ada, naik satu dan coba lagi.
+  // POST tanpa x-upsert memberi jalur reservasi yang jauh lebih aman antar perangkat.
+  for(let attempt=0;attempt<50;attempt++,candidate++){
+    const path=`sequences/${yearNum}/${String(candidate).padStart(4,"0")}.lock`;
+    try{
+      await resolveReferralBucket(false,path);
+      const r=await fetch(cloudObjectUrl(path),{
+        method:"POST",
+        headers:cloudHeaders({"Content-Type":"text/plain","Cache-Control":"no-cache"}),
+        body:`reserved ${new Date().toISOString()}`
+      });
+      if(r.ok){
+        db=loadDB(); db.seqByYear=db.seqByYear||{};
+        db.seqByYear[yearNum]=Math.max(Number(db.seqByYear[yearNum]||0),candidate);
+        saveDB(db);
+        return `${pad(candidate)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${yearNum}`;
+      }
+      const txt=await r.text();
+      // Konflik/objek sudah ada: lanjut ke nomor berikutnya.
+      if(r.status===409 || r.status===400 || /already exists|duplicate|exists|conflict/i.test(txt)){
+        continue;
+      }
+      throw new Error(cloudErr(r.status,txt));
+    }catch(e){
+      // Jika reservasi gagal total karena endpoint/bucket, fallback ke pemeriksaan
+      // record cloud + counter lokal, tetapi jangan mengarang nomor.
+      if(attempt===49) throw e;
+    }
+  }
+  throw new Error("Nomor surat belum dapat dicadangkan. Silakan ulangi.");
+}
 async function getNextReferralNumberCloud(){
+  // Hanya PREVIEW. Nomor baru benar-benar dicadangkan saat Simpan/Kirim.
   const y=year();
   db=loadDB();
   const localMax=Number(db.seqByYear?.[y]||0);
@@ -2876,20 +2921,21 @@ async function ensureCurrentReferralNumberForSave(){
   const y=year();
   const current=String(currentRef||'');
   db=loadDB();
-  // Jika surat sudah benar-benar tercatat di DB lokal (yang berasal dari
-  // sinkronisasi Supabase atau penyimpanan sebelumnya), jangan pernah mengganti
-  // nomor saat tombol Simpan/Kirim ditekan ulang.
+  // Jika nomor sudah menjadi record tersimpan, nomor tidak pernah diganti.
   if(current && (db.referrals||[]).some(x=>String(x.no)===current)){
     displayRef(current);
     return current;
   }
-  const m=current.match(/^(\d+)\/PKM-TU\/[IVX]+\/(\d{4})$/);
-  const cloudMax=await getCloudMaxReferralSequence(y);
-  let next=Math.max(Number(db.seqByYear?.[y]||0),cloudMax)+1;
-  if(m && Number(m[2])===Number(y) && Number(m[1])>cloudMax){
-    next=Number(m[1]);
+  // Preview pada saat form dibuka tidak dianggap final. Ambil reservasi baru
+  // saat Simpan/Kirim agar dua perangkat tidak memakai nomor yang sama.
+  try{
+    currentRef=await reserveReferralSequenceCloud(y);
+  }catch(e){
+    const cloudMax=await getCloudMaxReferralSequence(y);
+    const localMax=Number(db.seqByYear?.[y]||0);
+    const next=Math.max(localMax,cloudMax)+1;
+    currentRef=`${pad(next)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
   }
-  currentRef=`${pad(next)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
   displayRef(currentRef);
   return currentRef;
 }
@@ -2985,26 +3031,48 @@ function getRoleNotificationParty(){
   if(session?.mode==="answer") return "receiver";
   return "";
 }
-// Saat membuat "Rujukan Baru", notifikasi lama dibersihkan dari tampilan dashboard
-// tanpa menghapus riwayat notifikasi yang melekat pada record Supabase.
-const NOTIFY_CLEARED_AT_PREFIX="puskesmas_lanjut_notification_cleared_at_v1_";
+// Pusat notifikasi dibuat berbasis NOMOR RUJUKAN AKTIF.
+// Saat nomor baru dibuat, notifikasi nomor sebelumnya tidak ikut terbawa.
+// Riwayat tetap tersimpan di record Supabase, tetapi tidak ditempelkan ke nomor baru.
+const NOTIFY_CLEARED_AT_PREFIX="puskesmas_lanjut_notification_cleared_at_v2_";
+const NOTIFY_ACTIVE_NO_PREFIX="puskesmas_lanjut_notification_active_no_v2_";
 function getNotificationClearedAt(party=getRoleNotificationParty()){
   if(!party) return 0;
   const n=Number(localStorage.getItem(NOTIFY_CLEARED_AT_PREFIX+party)||0);
   return Number.isFinite(n)?n:0;
 }
+function getActiveNotificationNo(party=getRoleNotificationParty()){
+  if(!party) return "";
+  return String(localStorage.getItem(NOTIFY_ACTIVE_NO_PREFIX+party)||"").trim();
+}
+function setActiveNotificationNo(no,party=getRoleNotificationParty()){
+  if(!party) return;
+  const value=String(no||"").trim();
+  if(value) localStorage.setItem(NOTIFY_ACTIVE_NO_PREFIX+party,value);
+  else localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+party);
+}
 function clearCurrentRoleNotifications(){
   const party=getRoleNotificationParty();
   if(!party) return;
   localStorage.setItem(NOTIFY_CLEARED_AT_PREFIX+party,String(Date.now()));
+  setActiveNotificationNo("",party);
   const ansEl=document.getElementById("answerNotification");
   if(ansEl && party==="receiver") ansEl.innerHTML="<strong>Notifikasi:</strong> Belum ada notifikasi baru.";
   renderGlobalIncomingNotification();
   renderRoleNotificationCenter();
 }
-function isRoleNotificationVisible(note,party){
+function activateNotificationForNo(no,party=getRoleNotificationParty(),createdAt=Date.now()){
+  if(!party || !no) return false;
+  const ts=new Date(createdAt||Date.now()).getTime();
+  if(Number.isFinite(ts) && ts<=getNotificationClearedAt(party)) return false;
+  setActiveNotificationNo(no,party);
+  return true;
+}
+function isRoleNotificationVisible(note,party,itemNo=""){
   const ts=new Date(note?.createdAt||0).getTime();
-  return Number.isFinite(ts) && ts>getNotificationClearedAt(party);
+  if(!Number.isFinite(ts) || ts<=getNotificationClearedAt(party)) return false;
+  const active=getActiveNotificationNo(party);
+  return !!active && String(itemNo||"")===active;
 }
 function focusReferralFromNotification(encodedNo){
   const no=decodeURIComponent(String(encodedNo||""));
@@ -3030,7 +3098,7 @@ function renderRoleNotificationCenter(){
   const rows=[];
   (db.referrals||[]).forEach(item=>{
     ensurePartyNotifications(item);
-    (item.partyNotifications?.[party]||[]).filter(n=>isRoleNotificationVisible(n,party)).forEach(n=>rows.push({...n,no:item.no,patient:item.rNama||"",status:item.status||""}));
+    (item.partyNotifications?.[party]||[]).filter(n=>isRoleNotificationVisible(n,party,item.no)).forEach(n=>rows.push({...n,no:item.no,patient:item.rNama||"",status:item.status||""}));
   });
   rows.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
   const top=rows.slice(0,8);
@@ -3121,6 +3189,7 @@ async function handleRealtimeReferralEvent(payload){
       if(!item){ return; }
       ensurePartyNotifications(item);
       const party=payload.party==="sender"?"sender":"receiver";
+      activateNotificationForNo(item.no,party,note.createdAt);
       const arr=item.partyNotifications[party];
       const exists=arr.some(n=>String(n.id||realtimeEventId(item.no,party,n))===eventId);
       if(!exists){
@@ -3210,9 +3279,22 @@ async function publishSupabaseRealtime(event,payload){
 
 function addPartyNotification(item,party,message,type="info"){
   ensurePartyNotifications(item);
-  const note={id:`n_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,message,type,createdAt:new Date().toISOString()};
-  item.partyNotifications[party].push(note);
+  const cleanMessage=String(message||"").trim();
+  const arr=item.partyNotifications[party];
+  // Cegah notifikasi ganda akibat kombinasi local save + realtime + polling.
+  const duplicate=arr.slice(-12).find(n=>
+    String(n.message||"").trim()===cleanMessage &&
+    String(n.type||"info")===String(type||"info") &&
+    Math.abs(new Date(n.createdAt||0).getTime()-Date.now())<15000
+  );
+  if(duplicate){
+    activateNotificationForNo(item.no,party,duplicate.createdAt);
+    return duplicate;
+  }
+  const note={id:`n_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,message:cleanMessage,type,createdAt:new Date().toISOString()};
+  arr.push(note);
   item.notifications.push({...note,party});
+  activateNotificationForNo(item.no,party,note.createdAt);
   // Realtime dipancarkan setelah record berhasil disinkronkan oleh pemanggil.
   return note;
 }
@@ -3228,8 +3310,8 @@ function renderPartyNotifications(item){
   const receiverNotes=item?.partyNotifications?.receiver||[];
   if(!receiverEl) return;
   receiverEl.className="notification-box";
-  const list=receiverNotes.slice(-8).reverse();
-  if(!list.length){receiverEl.innerHTML='<strong>Notifikasi:</strong> Belum ada notifikasi untuk penerima.';return;}
+  const list=receiverNotes.filter(n=>isRoleNotificationVisible(n,"receiver",item?.no)).slice(-1).reverse();
+  if(!list.length){receiverEl.innerHTML='<strong>Notifikasi:</strong> Belum ada notifikasi baru untuk nomor ini.';return;}
   receiverEl.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(n.createdAt))}</span><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
   const last=list[0];
   if(last.type==="warn") receiverEl.classList.add("warn");
@@ -3290,7 +3372,7 @@ function renderGlobalIncomingNotification(){
   const incomingEl=document.getElementById("incomingReferralNotice"); if(!incomingEl) return;
   db=loadDB(); const all=[];
   (db.referrals||[]).forEach(item=>{
-    (item.partyNotifications?.receiver||[]).filter(n=>isRoleNotificationVisible(n,"receiver")).forEach(n=>all.push({...n,no:item.no,patient:item.rNama||""}));
+    (item.partyNotifications?.receiver||[]).filter(n=>isRoleNotificationVisible(n,"receiver",item.no)).forEach(n=>all.push({...n,no:item.no,patient:item.rNama||""}));
   });
   all.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   const incoming=all.find(n=>/Rujukan baru masuk|Surat rujukan/i.test(String(n.message||"")))||all[0]||null;
@@ -3358,6 +3440,9 @@ function upsertReferral({status=null,notification=null,archive=false}={}){
 function newReferral(){
   currentRef=null;
   clearCurrentRoleNotifications();
+  // Nomor baru selalu memulai siklus notifikasi yang baru.
+  localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+"sender");
+  localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+"receiver");
   displayRef("");
   fill(refFields,{});
   fill(ansFields,{});
