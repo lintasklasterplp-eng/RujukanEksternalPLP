@@ -758,14 +758,16 @@ body.authenticated #loginGate{display:none!important}
 
       <div class="attachment-box no-print">
         <div class="section-title">File Balasan dari UPTD Puskesmas</div>
-        <div class="help">File yang dikirim kembali oleh pengirim rujukan sebagai jawaban atas permintaan RS akan tampil di sini.</div>
-        <div id="answerFileList" class="attachment-list"></div>
+        <div class="help">File tidak dimuat otomatis saat surat dibuka. Tekan tombol di bawah hanya jika ingin melihat atau membuka file.</div>
+        <button type="button" class="btn-secondary" id="btnLoadAnswerFile">Tampilkan File</button>
+        <div id="answerFileList" class="attachment-list" hidden></div>
       </div>
 
       <div class="incoming-attachment-box no-print" id="incomingAttachmentBox">
         <div class="section-title">Lampiran Penunjang Rujukan Masuk</div>
-        <div class="help" id="incomingAttachmentNotice">Setelah surat rujukan diterima, lampiran penunjang yang dikirim dari UPTD akan dimuat otomatis dari Supabase.</div>
-        <div id="incomingAttachmentList" class="attachment-list"></div>
+        <div class="help" id="incomingAttachmentNotice">Lampiran tidak dimuat otomatis saat surat dibuka, terutama pada HP. Tekan tombol hanya bila ingin melihat lampiran.</div>
+        <button type="button" class="btn-secondary" id="btnLoadIncomingAttachments">Tampilkan Lampiran</button>
+        <div id="incomingAttachmentList" class="attachment-list" hidden></div>
       </div>
 
       <div class="sig-grid">
@@ -1063,6 +1065,159 @@ function initLoginGate(){
 window.loginModeFromUsername=loginModeFromUsername;
 window.logoutRujukan=logout;
 
+function referralYearFromNo(no){
+  const m=String(no||'').match(/\/(?:PKM-TU)\/[IVX]+\/(\d{4})$/i);
+  return m?Number(m[1]):null;
+}
+async function listDirectPrefixForReset(bucket,prefix){
+  try{
+    const listed=await listBucketPrefixDirect(bucket,prefix);
+    return listed.ok?(listed.items||[]):[];
+  }catch(e){
+    console.warn('Daftar objek reset gagal:',prefix,e);
+    return [];
+  }
+}
+async function resetReferralSequenceCloud(y){
+  const yearNum=Number(y);
+  const bucket='rujukan_eksternal';
+  const paths=new Set();
+  const matchingNos=new Set();
+
+  // Record rujukan tahun berjalan adalah sumber utama nomor cloud.
+  const recordRows=await listDirectPrefixForReset(bucket,SUPABASE_RECORD_PREFIX);
+  for(const row of recordRows){
+    const name=String(row?.name||'').trim();
+    if(!name.endsWith('.json')) continue;
+    const path=`${SUPABASE_RECORD_PREFIX}/${name}`;
+    try{
+      const item=await cloudDownloadJson(path);
+      if(referralYearFromNo(item?.no)===yearNum){
+        const no=String(item.no); matchingNos.add(no); paths.add(path);
+      }
+    }catch(e){}
+  }
+
+  // Hapus PDF dan notifikasi yang terkait langsung dengan nomor lama.
+  for(const no of matchingNos){
+    const safe=cloudSafeNo(no);
+    [
+      `${SUPABASE_PDF_PREFIX}/ref/${safe}.pdf`,
+      `${SUPABASE_PDF_PREFIX}/answer/${safe}.pdf`,
+      `${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${safe}.json`
+    ].forEach(x=>paths.add(x));
+  }
+
+  // Hapus semua lampiran/metadata serta notifikasi event yang menunjuk ke nomor lama.
+  for(const prefix of [`${SUPABASE_ATTACHMENT_PREFIX}/`,`${SUPABASE_ATTACHMENT_META_PREFIX}/`,`${SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX}/`,`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/`]){
+    const rows=await listDirectPrefixForReset(bucket,prefix);
+    for(const row of rows){
+      const name=String(row?.name||'').trim();
+      if(!name) continue;
+      const full=`${prefix}${name}`;
+      if(prefix.startsWith(SUPABASE_ATTACHMENT_PREFIX+'/') || prefix.startsWith(SUPABASE_ATTACHMENT_META_PREFIX+'/')){
+        const safePart=full.split('/')[1]||'';
+        const noCandidate=String(safePart).replace(/_/g,'/');
+        const matches=[...matchingNos].some(no=>cloudSafeNo(no)===safePart);
+        if(matches) paths.add(full);
+      }else{
+        try{
+          const payload=await cloudDownloadJson(full);
+          if(referralYearFromNo(payload?.no)===yearNum) paths.add(full);
+        }catch(e){}
+      }
+    }
+  }
+
+  // Hapus semua lock angka tahun berjalan. RESET.json dibuat setelahnya sebagai penanda
+  // agar perangkat lain juga membuang cache nomor lama saat sinkronisasi.
+  const lockRows=await listDirectPrefixForReset(bucket,`sequences/${yearNum}/`);
+  for(const row of lockRows){
+    const name=String(row?.name||'').trim();
+    if(name) paths.add(`sequences/${yearNum}/${name}`);
+  }
+
+  // Hapus dalam batch kecil agar tidak terlalu besar untuk Storage API.
+  const all=[...paths];
+  for(let i=0;i<all.length;i+=100){
+    const batch=all.slice(i,i+100);
+    if(batch.length){
+      const r=await directStorageDelete(bucket,batch);
+      if(!r.ok && r.status!==404) throw new Error(cloudErr(r.status,r.text));
+    }
+  }
+
+  const marker={
+    type:'referral_number_reset',
+    year:yearNum,
+    resetAt:new Date().toISOString(),
+    resetTo:1,
+    note:'Nomor surat tahun ini direset ke 001. Record lama tahun berjalan telah dihapus dari penyimpanan operasional.'
+  };
+  await cloudUpload(`sequences/${yearNum}/RESET.json`,JSON.stringify(marker),'application/json');
+  return {year:yearNum,deletedObjects:all.length,deletedNumbers:[...matchingNos]};
+}
+async function resetLocalReferralSequence(y){
+  const yearNum=Number(y);
+  db=loadDB();
+  db.referrals=(db.referrals||[]).filter(x=>referralYearFromNo(x.no)!==yearNum);
+  db.seqByYear=db.seqByYear||{};
+  db.seqByYear[yearNum]=0;
+  saveDB(db);
+  localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+'sender');
+  localStorage.removeItem(NOTIFY_ACTIVE_NO_PREFIX+'receiver');
+  localStorage.removeItem(NOTIFY_CLEARED_AT_PREFIX+'sender');
+  localStorage.removeItem(NOTIFY_CLEARED_AT_PREFIX+'receiver');
+  try{
+    const idb=await openArchiveDB();
+    const stores=['pdfs','answerPdfs','attachments'];
+    await new Promise((resolve,reject)=>{
+      const tx=idb.transaction(stores,'readwrite');
+      for(const storeName of stores){
+        const store=tx.objectStore(storeName);
+        if(storeName==='attachments'){
+          const req=store.getAll();
+          req.onsuccess=()=>{ for(const x of req.result||[]){ if(referralYearFromNo(x.refNo)===yearNum) store.delete(x.id); } };
+        }else{
+          const req=store.getAll();
+          req.onsuccess=()=>{ for(const x of req.result||[]){ if(referralYearFromNo(x.no)===yearNum) store.delete(x.no); } };
+        }
+      }
+      tx.oncomplete=()=>{idb.close();resolve();};
+      tx.onerror=()=>{idb.close();reject(tx.error);};
+    });
+  }catch(e){ console.warn('Pembersihan arsip lokal saat reset nomor gagal:',e); }
+}
+async function resetReferralNumberCompletely(){
+  const y=year();
+  const pass=prompt("Masukkan Password Administrator untuk Reset Nomor:");
+  if(pass===null) return;
+  if(pass!==ADMIN_RESET_PASSWORD){ alert("Password Administrator salah."); return; }
+  const yes=confirm(`RESET TOTAL NOMOR SURAT TAHUN ${y}?\n\nNomor akan kembali ke 001. Semua record, PDF, lampiran, dan notifikasi rujukan tahun ${y} akan dihapus dari penyimpanan operasional Supabase agar nomor 001 tidak bentrok dengan data lama. Arsip/data tahun lain tidak diubah.\n\nLanjutkan?`);
+  if(!yes) return;
+  const btn=document.getElementById('btnReset');
+  if(btn){btn.disabled=true;btn.textContent='↺ Mereset...';}
+  try{
+    const result=await resetReferralSequenceCloud(y);
+    await resetLocalReferralSequence(y);
+    currentRef=null;
+    displayRef('');
+    fill(refFields,{});
+    fill(ansFields,{});
+    document.getElementById('aNoSurat').value='';
+    await renderArchives();
+    await renderAnswerArchives();
+    renderList(); renderDashboard(); renderCurrentStatus(); renderGlobalIncomingNotification();
+    renderAttachments(''); renderAnswerFile(''); renderIncomingReferralAttachments('');
+    alert(`Nomor surat tahun ${y} berhasil direset. Nomor rujukan berikutnya akan dimulai dari 001/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}.\n\n${result.deletedNumbers.length} nomor lama dihapus dari data operasional.`);
+    newReferral();
+  }catch(err){
+    console.error('Reset nomor total gagal:',err);
+    alert('Reset nomor gagal: '+(err?.message||String(err))+'\n\nTidak dilakukan reset sebagian agar nomor tidak menjadi tidak konsisten.');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='↺ Reset Nomor';}
+  }
+}
 function resetAllReferralData(){
   const pass=prompt("Masukkan Password Administrator untuk RESET DATA:");
   if(pass!==ADMIN_RESET_PASSWORD){ if(pass!==null) alert("Password Administrator salah."); return; }
@@ -1632,12 +1787,25 @@ async function syncReferralNow(no){
   try{item.updatedAt=item.updatedAt||new Date().toISOString();await uploadReferralToSupabase(item);supabaseLastError="";return true;}
   catch(e){supabaseLastError=e?.message||String(e);console.warn("Supabase sync gagal",e);return false;}
 }
+async function getReferralResetMarker(y){
+  try{ return await cloudDownloadJson(`sequences/${Number(y)}/RESET.json`); }catch(e){ return null; }
+}
 async function hydrateSupabaseReferrals(){
   if(supabaseHydrating) return false; supabaseHydrating=true;
   try{
+    const currentYear=year();
+    const resetMarker=await getReferralResetMarker(currentYear);
+    const resetAt=resetMarker?.resetAt?new Date(resetMarker.resetAt).getTime():0;
     const rows=await cloudList(SUPABASE_RECORD_PREFIX);const remote=[];
     for(const row of (rows||[]).filter(x=>String(x.name||"").endsWith(".json"))){try{const x=await cloudDownloadJson(`${SUPABASE_RECORD_PREFIX}/${row.name}`);if(x?.no)remote.push(x);}catch(e){console.warn("Gagal memuat record",row.name,e);}}
-    db=loadDB();const localMap=new Map((db.referrals||[]).map(x=>[x.no,x]));
+    db=loadDB();
+    const localRows=(db.referrals||[]).filter(x=>{
+      if(!resetAt) return true;
+      if(referralYearFromNo(x.no)!==currentYear) return true;
+      const lt=new Date(x.updatedAt||x.createdAt||0).getTime();
+      return !(Number.isFinite(lt) && lt<=resetAt);
+    });
+    const localMap=new Map(localRows.map(x=>[x.no,x]));
     for(const x of remote){const local=localMap.get(x.no);const rt=new Date(x.updatedAt||x.createdAt||0).getTime();const lt=new Date(local?.updatedAt||local?.createdAt||0).getTime();if(!local||rt>lt)localMap.set(x.no,{...local,...x});}
     db.referrals=Array.from(localMap.values()).filter(x=>!x.deleted).sort((a,b)=>String(b.updatedAt||b.createdAt||"").localeCompare(String(a.updatedAt||a.createdAt||"")));
     db.seqByYear=db.seqByYear||{};
@@ -1668,7 +1836,6 @@ async function hydrateReceiverDeliveryNotifications(){
     }
   }catch(e){console.warn("Daftar delivery receiver belum dapat dimuat",e);}
   renderGlobalIncomingNotification(); renderList();
-  if(currentRef) renderIncomingReferralAttachments(currentRef);
 }
 
 function startSupabasePolling(){
@@ -1833,6 +2000,39 @@ function formatFileSize(bytes){
   if(bytes<1024*1024) return (bytes/1024).toFixed(1)+" KB";
   return (bytes/1024/1024).toFixed(1)+" MB";
 }
+function resetDeferredAttachmentViews(no='') {
+  const incoming=document.getElementById('incomingAttachmentList');
+  const incomingBtn=document.getElementById('btnLoadIncomingAttachments');
+  const incomingNotice=document.getElementById('incomingAttachmentNotice');
+  if(incoming){incoming.innerHTML='';incoming.hidden=true;}
+  if(incomingBtn){incomingBtn.disabled=!no;incomingBtn.textContent=no?'Tampilkan Lampiran':'Tampilkan Lampiran';}
+  if(incomingNotice) incomingNotice.textContent=no
+    ? 'Lampiran tidak dimuat otomatis saat surat dibuka, terutama pada HP. Tekan tombol hanya bila ingin melihat lampiran.'
+    : 'Pilih surat rujukan terlebih dahulu.';
+
+  const answer=document.getElementById('answerFileList');
+  const answerBtn=document.getElementById('btnLoadAnswerFile');
+  if(answer){answer.innerHTML='';answer.hidden=true;}
+  if(answerBtn) answerBtn.disabled=!no;
+}
+async function showIncomingAttachments(){
+  if(!currentRef) return;
+  const el=document.getElementById('incomingAttachmentList');
+  const btn=document.getElementById('btnLoadIncomingAttachments');
+  if(el) el.hidden=false;
+  if(btn){btn.disabled=true;btn.textContent='Memuat...';}
+  await renderIncomingReferralAttachments(currentRef);
+  if(btn){btn.disabled=false;btn.textContent='Sembunyikan Lampiran';}
+}
+async function showAnswerFile(){
+  if(!currentRef) return;
+  const el=document.getElementById('answerFileList');
+  const btn=document.getElementById('btnLoadAnswerFile');
+  if(el) el.hidden=false;
+  if(btn){btn.disabled=true;btn.textContent='Memuat...';}
+  await renderAnswerFile(currentRef);
+  if(btn){btn.disabled=false;btn.textContent='Sembunyikan File';}
+}
 async function renderAttachments(no){
   const el=document.getElementById('attachmentList');
   if(!el) return;
@@ -1859,14 +2059,14 @@ async function renderIncomingReferralAttachments(no){
   if(!el) return;
   if(!no){
     el.innerHTML='<div class="help">Pilih surat rujukan masuk terlebih dahulu.</div>';
-    if(notice) notice.textContent='Setelah surat rujukan diterima, lampiran penunjang akan dimuat otomatis dari Supabase.';
+    if(notice) notice.textContent='Lampiran tidak dimuat otomatis. Tekan Tampilkan Lampiran untuk melihat file dari Supabase.';
     return;
   }
   try{
     const rows=(await getAttachments(no)).filter(x=>!['soap','answer-file'].includes(String(x.kind||'')));
     if(!rows.length){
       el.innerHTML='<div class="help">Belum ada Lampiran Penunjang Rujukan pada rujukan ini.</div>';
-      if(notice) notice.textContent='Belum ada lampiran penunjang yang tersimpan. Sistem akan memperbarui otomatis saat pengirim menambah lampiran.';
+      if(notice) notice.textContent='Belum ada Lampiran Penunjang Rujukan pada rujukan ini.';
       return;
     }
     if(notice) notice.textContent=`${rows.length} lampiran penunjang tersedia dan dapat dibuka langsung dari perangkat ini.`;
@@ -3208,7 +3408,6 @@ async function handleRealtimeReferralEvent(payload){
       renderGlobalIncomingNotification();
       renderRoleNotificationCenter();
       if(/lampiran|pemeriksaan penunjang|berkas SOAP/i.test(String(note.message||''))){
-        await renderIncomingReferralAttachments(item.no);
         if(document.getElementById('answerPanel')?.classList.contains('active')) switchTab('answerPanel');
       }
       showRealtimeToast(`Rujukan ${item.no}`,note.message||"Ada perubahan rujukan.",note.createdAt);
@@ -3216,7 +3415,6 @@ async function handleRealtimeReferralEvent(payload){
     }
     if(payload.kind==="attachment_updated"){
       await hydrateSupabaseReferrals().catch(()=>{});
-      await renderIncomingReferralAttachments(payload.no);
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();
       showRealtimeToast(`Lampiran rujukan ${payload.no}`,payload.message||"Lampiran penunjang baru tersedia.",payload.updatedAt||Date.now());
       return;
@@ -3227,7 +3425,6 @@ async function handleRealtimeReferralEvent(payload){
       await hydrateReceiverEventNotifications().catch(()=>{});
       await hydrateSenderDeliveryNotifications().catch(()=>{});
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();renderRoleNotificationCenter();
-      if(payload.no) await renderIncomingReferralAttachments(payload.no);
       if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message,payload.updatedAt||Date.now());
     }
   }catch(err){console.warn("Realtime notification handler gagal",err);}
@@ -3451,7 +3648,7 @@ function newReferral(){
   if(defaultWa) document.getElementById("rWhatsApp").value=defaultWa;
   renderList();
   renderAttachments("");
-  renderAnswerFile("");
+  resetDeferredAttachmentViews("");
   renderRequestedReplyFile("");
   syncDoctorDisplay();
   renderCurrentStatus();
@@ -3489,8 +3686,7 @@ function loadReferralRecord(no){
   fill(ansFields,x.answer||{});
   syncAnswerDoctorDisplay();
   renderAttachments(currentRef);
-  renderAnswerFile(currentRef);
-  renderIncomingReferralAttachments(currentRef);
+  resetDeferredAttachmentViews(currentRef);
   renderRequestedReplyFile(currentRef);
   switchTab(x.answered ? "answerPanel" : "refPanel");
   renderCurrentStatus();
@@ -4032,8 +4228,7 @@ async function loadReferralAndPreview(encoded){
     fill(ansFields,item.answer||{});
       syncAnswerDoctorDisplay();
     renderAttachments(no);
-    renderAnswerFile(no);
-    renderIncomingReferralAttachments(no);
+    resetDeferredAttachmentViews(no);
     renderRequestedReplyFile(no);
     updateSendAnswerButton();
     updateAnswerActionButtons();
@@ -4159,22 +4354,19 @@ document.getElementById("btnResetAllData").onclick=resetAllReferralData;
 document.getElementById("adminSettingsPassword").addEventListener("keydown",e=>{if(e.key==="Enter") unlockAccountSettings();});
 
 document.getElementById("waSettingsModal").addEventListener("click",e=>{if(e.target.id==="waSettingsModal") closeWaSettings();});
-document.getElementById("btnReset").onclick=()=>{
-  const y=year();
-  const pass=prompt("Masukkan Password Administrator untuk Reset Nomor:");
-  if(pass===null) return;
-  if(pass!==ADMIN_RESET_PASSWORD){
-    alert("Password Administrator salah.");
-    return;
-  }
-  if(confirm(`Reset penghitung nomor surat tahun ${y}? Data surat yang sudah tersimpan tidak dihapus.`)){
-    db=loadDB();
-    if(!db.seqByYear || typeof db.seqByYear!=="object") db.seqByYear={};
-    db.seqByYear[y]=0;
-    saveDB(db);
-    alert("Penghitung nomor surat tahun ini berhasil direset.");
-  }
-};
+document.getElementById("btnReset").onclick=resetReferralNumberCompletely;
+document.getElementById('btnLoadIncomingAttachments')?.addEventListener('click',async()=>{
+  const btn=document.getElementById('btnLoadIncomingAttachments');
+  const el=document.getElementById('incomingAttachmentList');
+  if(el && !el.hidden){ el.hidden=true; if(btn){btn.textContent='Tampilkan Lampiran';} return; }
+  await showIncomingAttachments();
+});
+document.getElementById('btnLoadAnswerFile')?.addEventListener('click',async()=>{
+  const btn=document.getElementById('btnLoadAnswerFile');
+  const el=document.getElementById('answerFileList');
+  if(el && !el.hidden){ el.hidden=true; if(btn){btn.textContent='Tampilkan File';} return; }
+  await showAnswerFile();
+});
 
 
 function applyDashboardFilters(){
@@ -4194,7 +4386,7 @@ if(dashboardFilterEl) dashboardFilterEl.addEventListener('change',applyDashboard
 newReferral();
 renderList();
 renderAttachments(currentRef);
-renderAnswerFile(currentRef);
+resetDeferredAttachmentViews(currentRef);
 renderRequestedReplyFile(currentRef);
 renderArchives();
 renderAnswerArchives();
