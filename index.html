@@ -171,6 +171,18 @@ button{font-family:inherit}.btn-primary{background:linear-gradient(135deg,#3559e
 .incoming-attachment-meta .attachment-name{font-weight:700}
 .attachment-type-badge{display:inline-flex;align-items:center;padding:3px 6px;border-radius:999px;background:#eef4ff;color:#3154c3;font-size:9px;font-weight:800;margin-right:5px}
 .file-request-card,.settings-card{border-radius:18px;padding:18px;border:1px solid #e2e8f0}.file-request-modal,.settings-modal{background:rgba(19,27,48,.42);backdrop-filter:blur(5px)}.request-file-highlight{border-radius:10px}.archive-actions button,.archive-actions .btn-secondary{border-radius:8px}.note{color:#7a8699}
+
+/* ===== ROLE NOTIFICATION CENTER ===== */
+.role-notification-center{margin-top:8px;padding:11px 12px;border:1px solid #dfe6f2;border-radius:12px;background:linear-gradient(180deg,#fbfdff,#f6f9ff);}
+.role-notification-center .rn-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px;}
+.role-notification-center .rn-title{font-size:11px;font-weight:800;color:#263653;}
+.role-notification-center .rn-badge{font-size:9px;font-weight:800;padding:3px 7px;border-radius:999px;background:#eef4ff;color:#3154c3;}
+.role-notification-center .rn-item{padding:8px 0;border-top:1px solid rgba(0,0,0,.07);}
+.role-notification-center .rn-item:first-child{border-top:0;}
+.role-notification-center .rn-meta{font-size:9px;color:#667085;margin-top:2px;}
+.role-notification-center .rn-message{font-size:11px;line-height:1.45;margin-top:3px;}
+.role-notification-center .rn-actions{margin-top:5px;display:flex;gap:5px;flex-wrap:wrap;}
+.role-notification-center .rn-request{background:#fff8e8;border-color:#f5d98a;}
 @media(max-width:900px){.quick-actions{grid-template-columns:repeat(2,1fr)}.tabs{grid-template-columns:1fr}.toolbar-section{top:63px!important}.app-header{align-items:flex-start;flex-direction:column}.header-meta{justify-content:flex-start}}
 @media(max-width:700px){.paper{padding:24px 16px}.toolbar-section{position:static!important}.quick-actions{grid-template-columns:1fr}.ref-workflow{grid-template-columns:repeat(2,1fr)}.dashboard-tools input,.dashboard-tools select{max-width:none;flex:1 1 180px}}
 @media print{.app-header,.tabs,.toolbar-section,.status-card,.quick-actions,.dashboard-tools{display:none!important}.dashboard-shell{padding:0;background:#fff}}
@@ -547,6 +559,7 @@ body.authenticated #loginGate{display:none!important}
       <div class="status-main"><span>Status Rujukan</span><span class="status-text" id="refStatusText">Belum dikirim</span></div>
       <div class="status-detail" id="refStatusDetail">Belum ada notifikasi.</div>
       <div class="notification-box" id="refNotification">Notifikasi akan tampil di sini.</div>
+      <div class="role-notification-center" id="refRoleNotificationCenter"></div>
     </div>
     <div class="paper" id="refPaper">
       <div class="inst"><b>PEMERINTAH KABUPATEN LINGGA</b><br>
@@ -572,15 +585,27 @@ body.authenticated #loginGate{display:none!important}
           <select id="rFaskesTujuan"><option value="">Pilih fasilitas kesehatan</option><option>RSUD Dabo</option><option>Fasilitas Kesehatan Lain</option></select>
           <label>Jenis Rujukan</label>
           <select id="rJenisRujukan"><option value="">Pilih</option><option>Rujukan Gawat Darurat</option><option>Rujukan Terencana</option><option>Rujukan Antar Fasilitas</option></select>
-          <label>Prioritas</label>
-          <select id="rPrioritas"><option value="">Pilih</option><option>Emergency</option><option>Urgent</option><option>Normal</option></select>
-          <label>Kebutuhan Pelayanan</label><input id="rKebutuhan" placeholder="Contoh: UGD, rawat inap, spesialis">
-          <label>Transportasi</label>
-          <select id="rTransportasi"><option value="">Pilih</option><option>Ambulans</option><option>Kendaraan keluarga</option><option>Lainnya</option></select>
+          <label>GCS Saat Dirujuk</label>
+          <select id="rKondisiRujukan" aria-label="GCS Saat Dirujuk">
+            <option value="">Pilih GCS</option>
+            <option value="GCS 15">GCS 15</option>
+            <option value="GCS 14">GCS 14</option>
+            <option value="GCS 13">GCS 13</option>
+            <option value="GCS 12">GCS 12</option>
+            <option value="GCS 11">GCS 11</option>
+            <option value="GCS 10">GCS 10</option>
+            <option value="GCS 9">GCS 9</option>
+            <option value="GCS 8">GCS 8</option>
+            <option value="GCS 7">GCS 7</option>
+            <option value="GCS 6">GCS 6</option>
+            <option value="GCS 5">GCS 5</option>
+            <option value="GCS 4">GCS 4</option>
+            <option value="GCS 3">GCS 3</option>
+          </select>
         </div>
+        <div class="help" style="margin-top:6px">Kondisi neurologis saat dirujuk dicatat dalam nilai GCS (3–15).</div>
         <div class="form-grid" style="margin-top:8px">
           <label>Alasan Rujukan</label><textarea id="rAlasanRujukan" placeholder="Masukkan alasan klinis / kebutuhan rujukan"></textarea>
-          <label>Kondisi Saat Dirujuk</label><textarea id="rKondisiRujukan" placeholder="Kondisi pasien saat akan dirujuk"></textarea>
         </div>
       </div>
 
@@ -617,6 +642,7 @@ body.authenticated #loginGate{display:none!important}
       <div class="attachment-box no-print" id="requestedReplyBox">
         <div class="section-title">Balasan atas Instruksi / Minta File RS</div>
         <div id="requestedReplyNotice" class="help">Belum ada permintaan file dari RS.</div>
+        <div id="requestedReplyCloudStatus" class="help" style="margin-top:5px">Data permintaan dan balasan disinkronkan ke Supabase.</div>
         <label for="requestedReplyMessage" style="display:block;font-weight:700;font-size:12px;margin:8px 0 5px">Balasan / Keterangan</label>
         <textarea id="requestedReplyMessage" rows="3" placeholder="Tuliskan balasan terhadap instruksi RS, keterangan file, atau penjelasan tambahan."></textarea>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">
@@ -672,7 +698,7 @@ body.authenticated #loginGate{display:none!important}
       </div>
       <label for="requestedFileName">Permintaan / Pesan dari RS</label>
       <textarea id="requestedFileName" rows="4" placeholder="Contoh: Mohon kirim hasil laboratorium terbaru dan resume medis pasien. Atau tuliskan pesan/instruksi lain."></textarea>
-      <div class="help">Permintaan dapat berupa nama file, beberapa file sekaligus, atau chat/ketikan bebas. Isi ini akan diteruskan ke Form Surat Rujukan sebagai notifikasi.</div>
+      <div class="help">Permintaan dapat berupa nama file, beberapa file sekaligus, atau chat/ketikan bebas. Permintaan, notifikasi, dan status pengiriman akan disimpan di Supabase agar dapat dilihat dari perangkat lain.</div>
       <div class="file-request-actions">
         <button type="button" class="btn-secondary" id="btnCancelFileRequest">Batal</button>
         <button type="button" class="btn-ok" id="btnConfirmFileRequest">OK</button>
@@ -718,7 +744,6 @@ body.authenticated #loginGate{display:none!important}
           <label>Nama Fasilitas</label><input id="aFaskesPenerima" value="RSUD Dabo">
           <label>Waktu Respons</label><input id="aWaktuRespons" type="datetime-local" title="Terisi otomatis saat petugas mulai mengisi jawaban; masih dapat dikoreksi manual.">
         </div>
-        <div class="form-grid" style="margin-top:8px"><label>Catatan Respons</label><textarea id="aCatatanRespons" placeholder="Keterangan penerimaan, alasan penolakan, kebutuhan tambahan, atau instruksi berikutnya"></textarea></div>
       </div>
 
       <div class="form-grid">
@@ -1442,10 +1467,6 @@ async function downloadReceiverDelivery(no){
   const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(no)}.json`;
   return await cloudDownloadJson(path);
 }
-async function downloadReceiverDelivery(no){
-  const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(no)}.json`;
-  return await cloudDownloadJson(path);
-}
 async function publishSenderDeliveryNotification(item,payload={}){
   if(!item?.no) throw new Error("Nomor rujukan belum tersedia untuk notifikasi pengirim.");
   const token=`${cloudSafeNo(item.no)}_${Date.now()}`;
@@ -1509,8 +1530,13 @@ async function hydrateSenderDeliveryNotifications(){
       }else if(delivery.type==="file_request"){
         item.fileRequest=item.fileRequest||{};
         if(delivery.request) item.fileRequest.name=delivery.request;
-        item.fileRequest.createdAt=delivery.sentAt||item.fileRequest.createdAt;
+        item.fileRequest.message=delivery.request||item.fileRequest.message||item.fileRequest.name;
+        item.fileRequest.createdAt=delivery.createdAt||delivery.sentAt||item.fileRequest.createdAt||new Date().toISOString();
+        item.fileRequest.requestedBy=delivery.sourceRole||item.fileRequest.requestedBy||"RSUD";
         item.status="request_file";
+        if(getRoleNotificationParty()==="sender" && (!currentRef || !db.referrals.some(x=>x.no===currentRef))){
+          currentRef=item.no;
+        }
       }else if(delivery.type==="request_reply"){
         item.fileRequest=item.fileRequest||{};
         if(delivery.request) item.fileRequest.name=delivery.request;
@@ -1521,7 +1547,8 @@ async function hydrateSenderDeliveryNotifications(){
       saveDB(db);
     }
   }catch(e){console.warn("Daftar delivery sender belum dapat dimuat",e);}
-  renderGlobalIncomingNotification(); renderList(); renderCurrentStatus();
+  renderGlobalIncomingNotification(); renderList(); renderCurrentStatus(); renderRoleNotificationCenter();
+  if(getRoleNotificationParty()==="sender") await renderRequestedReplyFile(currentRef);
 }
 async function uploadPdfToSupabase(no,blob,filename,kind,{publishRecord=true}={}){
   await verifyPdfBlob(blob,kind==="answer"?"PDF Jawaban":"PDF Surat Rujukan");
@@ -1610,7 +1637,7 @@ function startSupabasePolling(){
     await hydrateReceiverDeliveryNotifications().catch(()=>{});
     await hydrateSenderDeliveryNotifications().catch(()=>{});
     renderList();
-  },12000);
+  },4000);
 }
 async function listRemoteAttachmentMeta(no,force=false){
   if(!no)return []; if(!force&&remoteAttachmentCache.has(no))return remoteAttachmentCache.get(no);
@@ -1891,46 +1918,60 @@ async function sendRequestedReplyMessage(){
 async function renderRequestedReplyFile(no){
   const el=document.getElementById('requestedReplyList');
   const notice=document.getElementById('requestedReplyNotice');
+  const cloudStatus=document.getElementById('requestedReplyCloudStatus');
   const btn=document.getElementById('btnSendRequestedFile');
   if(!el) return;
-  if(!no){
-    el.innerHTML='<div class="help">Belum ada file.</div>';
-    if(notice) notice.textContent='Belum ada permintaan file dari RS.';
-    if(btn) btn.disabled=true;
-    return;
-  }
   try{
+    if(cloudStatus) cloudStatus.textContent='☁ Memuat permintaan dan balasan dari Supabase...';
     db=loadDB();
-    const item=db.referrals.find(x=>x.no===no);
-    const req=item?.fileRequest;
+    let item=no ? db.referrals.find(x=>String(x.no)===String(no)) : null;
+    // Puskesmas tetap melihat permintaan terbaru meskipun surat tersebut belum sedang dipilih.
+    if(!item && getRoleNotificationParty()==='sender'){
+      item=(db.referrals||[])
+        .filter(x=>x.fileRequest?.name && x.fileRequest?.createdAt)
+        .sort((a,b)=>new Date(b.fileRequest.createdAt)-new Date(a.fileRequest.createdAt))[0] || null;
+      if(item && !currentRef){
+        currentRef=item.no;
+        displayRef(currentRef);
+      }
+    }
+    if(!item || !item.fileRequest?.name){
+      el.innerHTML='<div class="help">Belum ada file yang diunggah untuk permintaan ini.</div>';
+      if(notice) notice.innerHTML='Belum ada permintaan file dari RS.';
+      if(cloudStatus) cloudStatus.textContent='☁ Menunggu permintaan dari Supabase.';
+      if(btn) btn.disabled=true;
+      return;
+    }
+    const req=item.fileRequest;
     if(notice){
-      let html=req
-        ? `<span class="request-file-highlight"><b>RS meminta / instruksi:</b> ${escapeHtml(req.name)}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`
-        : 'Belum ada permintaan file dari RS.';
+      let html=`<span class="request-file-highlight"><b>RS meminta / instruksi — No. ${escapeHtml(item.no)}:</b> ${escapeHtml(req.name||req.message||'-')}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`;
       if(req?.responseMessage){
         html += `<div class="request-file-highlight" style="margin-top:6px;background:#edf8ef;border-color:#b8dfbd"><b>Balasan Anda:</b> ${escapeHtml(req.responseMessage)}<br><span style="font-size:9px;color:#667085">Dikirim: ${escapeHtml(formatNotificationDateTime(req.responseMessageAt))}</span></div>`;
       }
       notice.innerHTML=html;
+      if(cloudStatus) cloudStatus.textContent='☁ Permintaan tersinkron ke Supabase';
       const replyBox=document.getElementById('requestedReplyMessage');
-      if(replyBox && req && !String(replyBox.value||'').trim()) replyBox.placeholder=`Balas permintaan RS: ${String(req.name||'')}`;
+      if(replyBox && !String(replyBox.value||'').trim()) replyBox.placeholder=`Balas permintaan RS: ${String(req.name||'')}`;
     }
-    const x=await getAnswerFileAttachment(no);
+    const x=await getAnswerFileAttachment(item.no);
     if(!x){
-      el.innerHTML=req ? '<div class="help">Belum ada file yang diunggah untuk permintaan ini.</div>' : '<div class="help">Belum ada file.</div>';
+      el.innerHTML='<div class="help">Belum ada file yang diunggah untuk permintaan ini.</div>';
       if(btn) btn.disabled=true;
       return;
     }
     el.innerHTML=`<div class="attachment-item">
       <div class="attachment-name" title="${escapeHtml(x.name)}"><span class="soap-badge">FILE BALASAN</span> ${escapeHtml(x.name)} <span class="help">(${formatFileSize(x.size)})</span></div>
       <div style="display:flex;gap:5px">
-        <button type="button" class="btn-secondary" onclick="openAttachment('${encodeURIComponent(x.id)}')">Buka</button>
+        <button type="button" class="btn-secondary" onclick="openAttachment('${encodeURIComponent(x.id)}','${encodeURIComponent(item.no)}')">Buka</button>
         <button type="button" class="btn-danger" onclick="removeRequestedReplyFile()">Hapus</button>
       </div>
     </div>`;
-    if(btn) btn.disabled=!(req && x);
+    if(btn) btn.disabled=!(req && x && String(currentRef||item.no)===String(item.no));
   }catch(err){
     console.error(err);
-    el.innerHTML='<div class="help">File balasan belum dapat dimuat.</div>';
+    el.innerHTML='<div class="help">Permintaan/file balasan belum dapat dimuat.</div>';
+    if(notice) notice.innerHTML='<span class="request-file-highlight">Permintaan RS belum dapat dimuat dari Supabase.</span>';
+    if(cloudStatus) cloudStatus.textContent='⚠ Gagal memuat dari Supabase';
     if(btn) btn.disabled=true;
   }
 }
@@ -2472,11 +2513,8 @@ function buildReferralPdfPaper(item,no){
     row('No. RM',val('rNoRM')),
     row('Fasilitas Tujuan',selectedText('rFaskesTujuan')),
     row('Jenis Rujukan',selectedText('rJenisRujukan')),
-    row('Prioritas',selectedText('rPrioritas')),
-    row('Kebutuhan Pelayanan',val('rKebutuhan')),
-    row('Transportasi',selectedText('rTransportasi')),
     row('Alasan Rujukan',val('rAlasanRujukan'),{full:true}),
-    row('Kondisi Saat Dirujuk',val('rKondisiRujukan'),{full:true})
+    row('GCS Saat Dirujuk',selectedText('rKondisiRujukan'),{full:true})
   ]); if(sRef.children.length>1) paper.appendChild(sRef);
 
   const sPatient=section('Identitas Pasien');
@@ -2752,11 +2790,75 @@ window.removeArchive=async (encoded)=>{
 let db=loadDB();
 let currentRef=null;
 
-function nextNumber(){
+async function getCloudMaxReferralSequence(y){
+  let maxNo=0;
+  try{
+    const rows=await cloudList(SUPABASE_RECORD_PREFIX);
+    for(const row of (rows||[])){
+      const name=String(row?.name||'');
+      if(!name.endsWith('.json')) continue;
+      const stem=name.replace(/\.json$/i,'');
+      const m=stem.match(/^(\d+)_PKM-TU_[IVX]+_(\d{4})$/i);
+      if(m && Number(m[2])===Number(y)) maxNo=Math.max(maxNo,Number(m[1]||0));
+    }
+    // Fallback bila listing Storage tidak memberikan nama file yang lengkap.
+    if(maxNo===0){
+      const remote=await cloudList(SUPABASE_RECORD_PREFIX);
+      for(const row of (remote||[])){
+        const name=String(row?.name||'');
+        const m=name.match(/^(\d+)[_-]PKM-TU[_-][IVX]+[_-](\d{4})/i);
+        if(m && Number(m[2])===Number(y)) maxNo=Math.max(maxNo,Number(m[1]||0));
+      }
+    }
+  }catch(e){
+    console.warn('Nomor cloud belum dapat dibaca:',e);
+  }
+  return maxNo;
+}
+async function getNextReferralNumberCloud(){
   const y=year();
-  db.seqByYear[y]=(db.seqByYear[y]||0)+1;
+  db=loadDB();
+  const localMax=Number(db.seqByYear?.[y]||0);
+  const cloudMax=await getCloudMaxReferralSequence(y);
+  const next=Math.max(localMax,cloudMax)+1;
+  return `${pad(next)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
+}
+async function ensureCurrentReferralNumberForSave(){
+  const y=year();
+  const current=String(currentRef||'');
+  db=loadDB();
+  // Jika surat sudah benar-benar tercatat di DB lokal (yang berasal dari
+  // sinkronisasi Supabase atau penyimpanan sebelumnya), jangan pernah mengganti
+  // nomor saat tombol Simpan/Kirim ditekan ulang.
+  if(current && (db.referrals||[]).some(x=>String(x.no)===current)){
+    displayRef(current);
+    return current;
+  }
+  const m=current.match(/^(\d+)\/PKM-TU\/[IVX]+\/(\d{4})$/);
+  const cloudMax=await getCloudMaxReferralSequence(y);
+  let next=Math.max(Number(db.seqByYear?.[y]||0),cloudMax)+1;
+  if(m && Number(m[2])===Number(y) && Number(m[1])>cloudMax){
+    next=Number(m[1]);
+  }
+  currentRef=`${pad(next)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
+  displayRef(currentRef);
+  return currentRef;
+}
+function commitLocalReferralSequence(no){
+  const m=String(no||'').match(/^(\d+)\/PKM-TU\/[IVX]+\/(\d{4})$/);
+  if(!m) return;
+  db=loadDB();
+  db.seqByYear=db.seqByYear||{};
+  db.seqByYear[m[4]]=Math.max(Number(db.seqByYear[m[4]]||0),Number(m[1]||0));
   saveDB(db);
-  return `${pad(db.seqByYear[y])}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
+}
+function nextNumber(){
+  // Dipertahankan hanya untuk kompatibilitas kode lama. Nomor baru tidak
+  // lagi menaikkan counter saat form dibuka; counter dikomit setelah record
+  // berhasil tersimpan sehingga refresh/form kosong tidak membuat nomor meloncat.
+  const y=year();
+  const n=Math.max(0,Number(db.seqByYear?.[y]||0))+1;
+  return `${pad(n)}/PKM-TU/${romanMonth(new Date().getMonth()+1)}/${y}`;
 }
 function displayRef(no){
   const v=String(no||"");
@@ -2769,8 +2871,8 @@ function fields(ids){
 function fill(ids,obj){
   ids.forEach(id=>{if(document.getElementById(id)) document.getElementById(id).value=obj?.[id]||"";});
 }
-const refFields=["rNama","rUsia","rJK","rPekerjaan","rWhatsApp","rAlamat","rPenanggungJawab","rNoHPPenanggungJawab","rKeluhan","rFisik","rLab","rRontgen","rEkg","rDx","rTerapi","rDokter","rNoRM","rFaskesTujuan","rJenisRujukan","rPrioritas","rKebutuhan","rTransportasi","rAlasanRujukan","rKondisiRujukan"];
-const ansFields=["aNoSurat","aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aWaktuRespons","aCatatanRespons"];
+const refFields=["rNama","rUsia","rJK","rPekerjaan","rWhatsApp","rAlamat","rPenanggungJawab","rNoHPPenanggungJawab","rKeluhan","rFisik","rLab","rRontgen","rEkg","rDx","rTerapi","rDokter","rNoRM","rFaskesTujuan","rJenisRujukan","rAlasanRujukan","rKondisiRujukan"];
+const ansFields=["aNoSurat","aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aWaktuRespons"];
 
 function syncDoctorDisplay(){
   const v=document.getElementById("rDokter")?.value||"";
@@ -2827,6 +2929,79 @@ function ensurePartyNotifications(item){
   item.partyNotifications.sender=item.partyNotifications.sender||[];
   item.partyNotifications.receiver=item.partyNotifications.receiver||[];
   return item;
+}
+function getRoleNotificationParty(){
+  const session=getSession();
+  if(session?.mode==="referral") return "sender";
+  if(session?.mode==="answer") return "receiver";
+  return "";
+}
+// Saat membuat "Rujukan Baru", notifikasi lama dibersihkan dari tampilan dashboard
+// tanpa menghapus riwayat notifikasi yang melekat pada record Supabase.
+const NOTIFY_CLEARED_AT_PREFIX="puskesmas_lanjut_notification_cleared_at_v1_";
+function getNotificationClearedAt(party=getRoleNotificationParty()){
+  if(!party) return 0;
+  const n=Number(localStorage.getItem(NOTIFY_CLEARED_AT_PREFIX+party)||0);
+  return Number.isFinite(n)?n:0;
+}
+function clearCurrentRoleNotifications(){
+  const party=getRoleNotificationParty();
+  if(!party) return;
+  localStorage.setItem(NOTIFY_CLEARED_AT_PREFIX+party,String(Date.now()));
+  const refEl=document.getElementById("refNotification");
+  const ansEl=document.getElementById("answerNotification");
+  if(refEl && party==="sender") refEl.innerHTML="<strong>Notifikasi:</strong> Belum ada notifikasi baru.";
+  if(ansEl && party==="receiver") ansEl.innerHTML="<strong>Notifikasi:</strong> Belum ada notifikasi baru.";
+  renderGlobalIncomingNotification();
+  renderRoleNotificationCenter();
+}
+function isRoleNotificationVisible(note,party){
+  const ts=new Date(note?.createdAt||0).getTime();
+  return Number.isFinite(ts) && ts>getNotificationClearedAt(party);
+}
+function focusReferralFromNotification(encodedNo){
+  const no=decodeURIComponent(String(encodedNo||""));
+  db=loadDB();
+  const item=db.referrals.find(x=>String(x.no)===String(no));
+  if(!item){alert("Data rujukan belum tersedia di perangkat ini. Sinkronkan Supabase terlebih dahulu.");return;}
+  loadReferralRecord(no);
+  const party=getRoleNotificationParty();
+  switchTab(party==="receiver"?"answerPanel":"refPanel");
+  document.getElementById(party==="receiver"?"answerStatusCard":"refStatusCard")?.scrollIntoView({behavior:"smooth",block:"start"});
+}
+window.focusReferralFromNotification=focusReferralFromNotification;
+function getRoleCloudNotificationStatus(){
+  const session=getSession();
+  if(!session) return "Belum login";
+  return realtimeReady ? "Realtime + Supabase aktif" : "Supabase polling aktif";
+}
+function renderRoleNotificationCenter(){
+  const party=getRoleNotificationParty();
+  const el=party==="sender"?document.getElementById("refRoleNotificationCenter"):party==="receiver"?document.getElementById("answerRoleNotificationCenter"):null;
+  if(!el) return;
+  db=loadDB();
+  const rows=[];
+  (db.referrals||[]).forEach(item=>{
+    ensurePartyNotifications(item);
+    (item.partyNotifications?.[party]||[]).filter(n=>isRoleNotificationVisible(n,party)).forEach(n=>rows.push({...n,no:item.no,patient:item.rNama||"",status:item.status||""}));
+  });
+  rows.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+  const top=rows.slice(0,8);
+  if(!top.length){
+    el.innerHTML='<div class="rn-head"><span class="rn-title">NOTIFIKASI</span><span class="rn-badge">0</span></div><div class="rn-meta">'+escapeHtml(getRoleCloudNotificationStatus())+'</div><div class="help">Belum ada notifikasi.</div>';
+    return;
+  }
+  el.innerHTML=`<div class="rn-head"><span class="rn-title">NOTIFIKASI TERBARU</span><span class="rn-badge">${top.length}</span></div><div class="rn-meta" style="margin-bottom:6px">${escapeHtml(getRoleCloudNotificationStatus())}</div>`+top.map(n=>{
+    const isReq=/meminta file|permintaan file|instruksi RS/i.test(String(n.message||""));
+    const cls=isReq?' rn-request':'';
+    const when=formatNotificationDateTime(n.createdAt);
+    return `<div class="rn-item${cls}">
+      <div><b>No. ${escapeHtml(n.no||"-")}</b>${n.patient?` · ${escapeHtml(n.patient)}`:""}</div>
+      <div class="rn-meta">${escapeHtml(when)}</div>
+      <div class="rn-message">${escapeHtml(n.message||"Notifikasi")}</div>
+      <div class="rn-actions"><button type="button" class="btn-secondary small-btn" onclick="focusReferralFromNotification('${encodeURIComponent(n.no||"")}')">Buka Rujukan</button></div>
+    </div>`;
+  }).join('');
 }
 /* ===== SUPABASE REALTIME NOTIFICATION ===== */
 const SUPABASE_REALTIME_TOPIC="rujukan-terintegrasi-uptd-puskesmas-lanjut-v1";
@@ -2915,6 +3090,7 @@ async function handleRealtimeReferralEvent(payload){
       renderDashboard();
       renderCurrentStatus();
       renderGlobalIncomingNotification();
+      renderRoleNotificationCenter();
       if(/lampiran|pemeriksaan penunjang|berkas SOAP/i.test(String(note.message||''))){
         await renderIncomingReferralAttachments(item.no);
         if(document.getElementById('answerPanel')?.classList.contains('active')) switchTab('answerPanel');
@@ -2933,7 +3109,7 @@ async function handleRealtimeReferralEvent(payload){
       await hydrateSupabaseReferrals().catch(()=>{});
       await hydrateReceiverDeliveryNotifications().catch(()=>{});
       await hydrateSenderDeliveryNotifications().catch(()=>{});
-      renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();
+      renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();renderRoleNotificationCenter();
       if(payload.no) await renderIncomingReferralAttachments(payload.no);
       if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message,payload.updatedAt||Date.now());
     }
@@ -3007,7 +3183,9 @@ function renderPartyNotifications(item){
   const render=(el,notes,empty)=>{
     if(!el) return;
     el.className="notification-box";
-    const list=notes.slice(-5).reverse();
+    const party=el===senderEl?"sender":"receiver";
+    const visibleNotes=notes.filter(n=>isRoleNotificationVisible(n,party));
+    const list=visibleNotes.slice(-5).reverse();
     if(!list.length){el.innerHTML=`<strong>Notifikasi:</strong> ${empty}`;return;}
     el.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(n.createdAt))}</span><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
     const last=list[0];
@@ -3035,10 +3213,10 @@ function broadcastReferral(no,message=""){
   publishSupabaseRealtime("referral_update",{kind:"record_updated",no,message,updatedAt:new Date().toISOString()});
 }
 notifyChannel?.addEventListener("message",e=>{
-  if(e.data?.no){ renderCurrentStatus(); renderList(); renderGlobalIncomingNotification(); }
+  if(e.data?.no){ renderCurrentStatus(); renderList(); renderGlobalIncomingNotification(); renderRoleNotificationCenter(); }
 });
 window.addEventListener("storage",e=>{
-  if(e.key===KEY){ renderCurrentStatus(); renderList(); renderGlobalIncomingNotification(); }
+  if(e.key===KEY){ renderCurrentStatus(); renderList(); renderGlobalIncomingNotification(); renderRoleNotificationCenter(); }
 });
 function statusLabel(status){
   const map={
@@ -3072,7 +3250,7 @@ function renderGlobalIncomingNotification(){
   const incomingEl=document.getElementById("incomingReferralNotice"); if(!incomingEl) return;
   db=loadDB(); const all=[];
   (db.referrals||[]).forEach(item=>{
-    (item.partyNotifications?.receiver||[]).forEach(n=>all.push({...n,no:item.no,patient:item.rNama||""}));
+    (item.partyNotifications?.receiver||[]).filter(n=>isRoleNotificationVisible(n,"receiver")).forEach(n=>all.push({...n,no:item.no,patient:item.rNama||""}));
   });
   all.sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));
   const incoming=all.find(n=>/Rujukan baru masuk|Surat rujukan/i.test(String(n.message||"")))||all[0]||null;
@@ -3098,6 +3276,7 @@ function renderCurrentStatus(){
     notifEl.innerHTML=note?`<strong>Notifikasi:</strong> No. ${escapeHtml(item?.no||currentRef||"-")}<br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(note.createdAt))}</span><br>${escapeHtml(note.message)}`:`<strong>Notifikasi:</strong> Belum ada notifikasi.`;
   }
   renderPartyNotifications(item||{});
+  renderRoleNotificationCenter();
   const flow=document.getElementById("dashboardFlow");
   if(flow){
     const stage=computeReferralStage(item?.status);
@@ -3142,25 +3321,30 @@ function upsertReferral({status=null,notification=null,archive=false}={}){
   return item;
 }
 function newReferral(){
-  currentRef=nextNumber();
-  displayRef(currentRef);
+  currentRef=null;
+  clearCurrentRoleNotifications();
+  displayRef("");
   fill(refFields,{});
   fill(ansFields,{});
   document.getElementById("aNoSurat").value="";
   const defaultWa=getDefaultWhatsApp();
   if(defaultWa) document.getElementById("rWhatsApp").value=defaultWa;
   renderList();
-  renderAttachments(currentRef);
-  renderAnswerFile(currentRef);
-  renderRequestedReplyFile(currentRef);
+  renderAttachments("");
+  renderAnswerFile("");
+  renderRequestedReplyFile("");
   syncDoctorDisplay();
   renderCurrentStatus();
   updateSendAnswerButton();
   document.getElementById("rNama").focus();
   renderDashboard();
+  // Nomor hanya pratinjau dari cloud; belum dianggap terpakai sampai Simpan/Kirim.
+  getNextReferralNumberCloud().then(no=>{
+    if(!currentRef){ currentRef=no; displayRef(no); renderCurrentStatus(); }
+  }).catch(()=>{});
 }
 async function saveReferral(){
-  if(!currentRef) newReferral();
+  await ensureCurrentReferralNumberForSave();
   const item=upsertReferral({status:"saved",archive:false});
   db=loadDB(); const live=db.referrals.find(r=>r.no===currentRef); if(live){live.updatedAt=new Date().toISOString();saveDB(db);}
   // Buat/upload/validasi PDF lebih dahulu. Record cloud tetap berstatus draft/saved sampai PDF tersedia.
@@ -3175,6 +3359,7 @@ async function saveReferral(){
     alert("No. "+item.no+": PDF surat rujukan belum siap dikirim.");
     return false;
   }
+  commitLocalReferralSequence(item.no);
   alert("No. "+item.no+": surat rujukan berhasil disimpan dan siap dikirim ke RSUD.");
   return true;
 }
@@ -3214,7 +3399,7 @@ function ensureAnswerResponseStarted(item=null){
 }
 function maybeStartAnswerResponse(){
   if(!currentRef) return;
-  const triggerIds=["aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima","aCatatanRespons"];
+  const triggerIds=["aNama","aUsia","aAlamat","aPemeriksa","aDx","aTerapi","aDokter","aStatusRujukan","aUnitTujuan","aFaskesPenerima"];
   const any=triggerIds.some(id=>String(document.getElementById(id)?.value||"").trim()!=="");
   if(!any) return;
   db=loadDB();
@@ -3434,48 +3619,64 @@ async function confirmFileRequest(){
   if(!currentRef){alert("Pilih nomor surat rujukan terlebih dahulu.");return;}
   const input=document.getElementById('requestedFileName');
   const request=String(input?.value||"").trim();
-  if(!request){alert("Tuliskan pesan, permintaan file, atau instruksi dari RS terlebih dahulu.");input?.focus();return;}
+  if(!request){alert("Tuliskan permintaan file/instruksi RS terlebih dahulu.");input?.focus();return;}
+
   db=loadDB();
   const idx=db.referrals.findIndex(x=>x.no===currentRef);
-  if(idx<0){alert("Surat rujukan belum disimpan.");return;}
+  if(idx<0){alert("Surat rujukan belum ditemukan pada perangkat ini.");return;}
   const old=db.referrals[idx];
+  const requestCreatedAt=new Date().toISOString();
   old.answer={...(old.answer||{}),statusText:"RS mengirim permintaan file",message:request};
   old.answered=false;
   old.status="request_file";
-  old.fileRequest={name:request,message:request,requestType:"message_or_file",createdAt:new Date().toISOString(),requestedBy:old.answer.aDokter||"Dokter RS"};
-  old.updatedAt=new Date().toISOString();
-  addPartyNotification(old,"sender",`Pesan/permintaan dari RS: ${request}`,"warn");
-  addPartyNotification(old,"receiver",`Pesan/permintaan RS dicatat: ${request}`,"info");
+  old.fileRequest={
+    name:request, message:request, requestType:"message_or_file",
+    createdAt:requestCreatedAt, requestedBy:old.answer.aDokter||"Dokter RS",
+    targetParty:"sender", targetRole:"Puskesmas Lanjut", sourceRole:"RSUD Dabo"
+  };
+  old.updatedAt=requestCreatedAt;
+  const requestNote=addPartyNotification(old,"sender",`RS meminta file/informasi: ${request}`,"warn");
+  addPartyNotification(old,"receiver",`Permintaan file/informasi tercatat: ${request}`,"info");
+
+  // 1) Record utama harus tersimpan ke Supabase.
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
   if(!synced){
-    broadcastReferral(currentRef,"Permintaan file belum tersinkron ke Supabase.");
-    renderList(); renderCurrentStatus();
-    alert("Permintaan file sudah tersimpan di perangkat ini, tetapi BELUM tersimpan ke Supabase. Periksa koneksi/bucket lalu ulangi.");
+    renderList(); renderCurrentStatus(); renderRoleNotificationCenter();
+    alert("Permintaan file BELUM dikirim ke Puskesmas karena record belum tersimpan ke Supabase. Periksa bucket/koneksi lalu ulangi.");
     return;
   }
+
+  // 2) Buat delivery notification khusus untuk pengirim/Puskesmas.
   try{
     await publishSenderDeliveryNotification(old,{
-      type:"file_request",
-      request,
-      notification:`RS meminta file/informasi untuk No. ${old.no}: ${request}`
+      type:"file_request", request,
+      notification:`RS meminta file/informasi untuk No. ${old.no}: ${request}`,
+      createdAt:requestCreatedAt, eventId:requestNote.id,
+      targetRole:"Puskesmas Lanjut", sourceRole:"RSUD Dabo",
+      role:"sender",
+      displayIn:"Balasan atas Instruksi / Minta File RS"
     });
   }catch(e){
-    console.warn("Delivery permintaan file gagal:",e);
-    alert("Permintaan file tersimpan, tetapi notifikasi cloud belum terbentuk. Coba ulangi pengiriman notifikasi.");
+    console.error("Delivery permintaan file gagal:",e);
+    alert("Permintaan sudah tersimpan, tetapi delivery notifikasi Puskesmas gagal dibuat. Ulangi pengiriman setelah koneksi Supabase normal.");
     return;
   }
-  broadcastReferral(currentRef,`RS meminta file/informasi: ${request}`);
-  renderList();
-  renderCurrentStatus();
+
   closeFileRequest();
+  renderList(); renderCurrentStatus(); renderRoleNotificationCenter();
   await renderRequestedReplyFile(currentRef);
+  broadcastReferral(currentRef,`RS meminta file/informasi: ${request}`);
+  await hydrateSenderDeliveryNotifications().catch(()=>{});
+  renderRoleNotificationCenter();
+
   const senderNo=getSenderWhatsApp();
   if(senderNo){
-    openWhatsAppTo(senderNo,`NOTIFIKASI PESAN / PERMINTAAN RS\nNo: ${old.no}\nTanggal/Waktu: ${formatNotificationDateTime(old.fileRequest.createdAt)}\nPesan/permintaan: ${request}\nDokter penerima: ${old.answer.aDokter||"-"}`);
+    openWhatsAppTo(senderNo,`NOTIFIKASI PESAN / PERMINTAAN RS\nNo: ${old.no}\nTanggal/Waktu: ${formatNotificationDateTime(requestCreatedAt)}\nPesan/permintaan: ${request}\nDokter penerima: ${old.answer.aDokter||"-"}`);
   }
-  alert("Permintaan file/pesan untuk No. "+old.no+" berhasil dikirim dan tersinkron ke Supabase pada "+formatNotificationDateTime(old.fileRequest.createdAt)+".");
+  alert("Permintaan file No. "+old.no+" berhasil dikirim ke Puskesmas dan tersimpan di Supabase pada "+formatNotificationDateTime(requestCreatedAt)+".");
 }
+
 async function accReferral(){
   if(!currentRef){alert("Pilih surat rujukan masuk terlebih dahulu.");return;}
   db=loadDB(); const idx=db.referrals.findIndex(x=>x.no===currentRef);
@@ -3522,7 +3723,6 @@ async function rejectReferral(){
   old.answer={...(old.answer||{}),...fields(ansFields),statusText:"Tidak Dapat Menerima",message:reason||"Fasilitas penerima tidak dapat menerima rujukan.",rejectedAt:new Date().toISOString()};
   old.answered=true; old.status="rejected";
   old.aStatusRujukan="ditolak";
-  old.aCatatanRespons=reason||old.aCatatanRespons||"";
   old.updatedAt=new Date().toISOString();
   addPartyNotification(old,"sender",`Fasilitas penerima tidak dapat menerima rujukan. Alasan: ${reason||"-"}`,"warn");
   addPartyNotification(old,"receiver","Status tidak dapat menerima berhasil dicatat.","warn");
@@ -3591,7 +3791,7 @@ async function sendRequestedFileBack(){
 }
 
 async function sendToWhatsApp(){
-  if(!currentRef) newReferral();
+  await ensureCurrentReferralNumberForSave();
   const itemBefore=upsertReferral({status:"preparing"});
   db=loadDB(); const live=db.referrals.find(x=>x.no===itemBefore.no);
   if(!live){alert("Data rujukan tidak ditemukan.");return;}
@@ -3621,6 +3821,7 @@ async function sendToWhatsApp(){
   renderCurrentStatus();
   renderList();
   renderDashboard();
+  commitLocalReferralSequence(sent.no);
   alert("Rujukan No. "+sent.no+" berhasil dikirim ke RSUD. Form Surat Rujukan sudah dikosongkan untuk rujukan berikutnya.");
 }
 function shareCurrentReferralWhatsApp(){
@@ -3633,7 +3834,6 @@ function shareCurrentReferralWhatsApp(){
     "No: "+item.no,
     "Pasien: "+(item.rNama||"-"),
     "Faskes tujuan: "+(item.rFaskesTujuan||"-"),
-    "Prioritas: "+(item.rPrioritas||"-"),
     "Diagnosis: "+(item.rDx||"-"),
     "Status: "+statusLabel(item.status)
   ].join("\n");
@@ -3887,8 +4087,10 @@ startSupabasePolling();
 hydrateSupabaseReferrals().catch(()=>{});
 hydrateReceiverDeliveryNotifications().catch(()=>{});
 hydrateSenderDeliveryNotifications().catch(()=>{});
+renderRoleNotificationCenter();
 /* Login harus dijalankan paling akhir agar seluruh DOM aplikasi sudah tersedia. */
 initLoginGate();
+renderRoleNotificationCenter();
 </script>
 
 <div id="pdfViewerModal" class="pdf-viewer-modal" hidden>
