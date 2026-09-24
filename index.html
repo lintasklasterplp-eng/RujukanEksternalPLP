@@ -610,12 +610,12 @@ body.authenticated #loginGate{display:none!important}
       </div>
 
       <div class="form-grid">
+        <input id="rWhatsApp" type="hidden" aria-hidden="true">
         <label>Nama</label><input id="rNama">
         <label>Usia / Tgl Lahir</label><input id="rUsia">
         <label>Jenis Kelamin</label>
         <select id="rJK"><option value="">Pilih</option><option>Laki-laki</option><option>Perempuan</option></select>
         <label>Pekerjaan</label><input id="rPekerjaan">
-        <label>No. WhatsApp RS</label><input id="rWhatsApp" inputmode="numeric" placeholder="Contoh 62812xxxxxxx">
         <label>Alamat</label><textarea id="rAlamat"></textarea>
         <label>Penanggung Jawab Pasien</label><input id="rPenanggungJawab" placeholder="Nama penanggung jawab pasien">
         <label>No HP</label><input id="rNoHPPenanggungJawab" inputmode="numeric" placeholder="Nomor HP penanggung jawab pasien">
@@ -641,8 +641,7 @@ body.authenticated #loginGate{display:none!important}
 
       <div class="attachment-box no-print" id="requestedReplyBox">
         <div class="section-title">Balasan atas Instruksi / Minta File RS</div>
-        <div id="requestedReplyNotice" class="help">Belum ada permintaan file dari RS.</div>
-        <div id="requestedReplyCloudStatus" class="help" style="margin-top:5px">Data permintaan dan balasan disinkronkan ke Supabase.</div>
+        <div class="help" id="requestedReplyStaticHelp">Gunakan kolom ini hanya untuk mengirim balasan atas instruksi RS. Notifikasi ditampilkan di bagian atas Dashboard.</div>
         <label for="requestedReplyMessage" style="display:block;font-weight:700;font-size:12px;margin:8px 0 5px">Balasan / Keterangan</label>
         <textarea id="requestedReplyMessage" rows="3" placeholder="Tuliskan balasan terhadap instruksi RS, keterangan file, atau penjelasan tambahan."></textarea>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">
@@ -2401,8 +2400,8 @@ function resetDeferredAttachmentViews(no='') {
   const requestedInput=document.getElementById('requestedReplyMessage');
   const requestedStatus=document.getElementById('requestedReplyMessageStatus');
   if(requestedList) requestedList.innerHTML='';
-  if(requestedNotice) requestedNotice.textContent=no?'Memeriksa instruksi aktif pada nomor ini...':'Tidak ada instruksi RS aktif.';
-  if(requestedCloud) requestedCloud.textContent=no?'☁ Menunggu instruksi RS untuk nomor ini.':'☁ Tidak ada nomor aktif.';
+  if(requestedNotice) requestedNotice.textContent='';
+  if(requestedCloud) requestedCloud.textContent='';
   if(requestedInput) requestedInput.value='';
   if(requestedStatus) requestedStatus.textContent='';
 }
@@ -2589,29 +2588,27 @@ async function renderRequestedReplyFile(no){
     // Tidak boleh mengambil instruksi dari rujukan lain ketika nomor baru
     // belum dipilih. Instruksi hanya milik nomor surat yang sedang aktif.
     if(!item || !item.fileRequest?.name){
-      el.innerHTML='<div class="help">Tidak ada instruksi RS yang aktif pada nomor ini.</div>';
-      if(notice) notice.innerHTML='Tidak ada instruksi RS yang aktif.';
-      if(cloudStatus) cloudStatus.textContent=no?'☁ Tidak ada instruksi aktif untuk nomor ini.':'☁ Menunggu instruksi dari RS.';
+      el.innerHTML='<div class="help">Tidak ada instruksi RS aktif pada nomor ini.</div>';
+      if(notice) notice.textContent='';
+      if(cloudStatus) cloudStatus.textContent='';
       if(btn) btn.disabled=true;
       const replyBox=document.getElementById('requestedReplyMessage');
       if(replyBox) replyBox.value='';
       return;
     }
     const req=item.fileRequest;
-    if(notice){
-      notice.innerHTML=`<span class="request-file-highlight"><b>RS meminta / instruksi — No. ${escapeHtml(item.no)}:</b> ${escapeHtml(req.name||req.message||'-')}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`;
-      if(cloudStatus) cloudStatus.textContent='☁ Instruksi tersinkron ke Supabase';
-      const replyBox=document.getElementById('requestedReplyMessage');
-      if(replyBox && !String(replyBox.value||'').trim()) replyBox.placeholder=`Balas permintaan RS: ${String(req.name||'')}`;
-    }
+    if(notice) notice.textContent='';
+    if(cloudStatus) cloudStatus.textContent='';
+    const replyBox=document.getElementById('requestedReplyMessage');
+    if(replyBox && !String(replyBox.value||'').trim()) replyBox.placeholder='Tuliskan balasan untuk permintaan RS.';
     const x=await getAnswerFileAttachment(item.no);
     if(el) el.innerHTML='';
     if(btn) btn.disabled=!(req && x && String(currentRef||item.no)===String(item.no));
   }catch(err){
     console.error(err);
     el.innerHTML='<div class="help">Permintaan/file balasan belum dapat dimuat.</div>';
-    if(notice) notice.innerHTML='<span class="request-file-highlight">Permintaan RS belum dapat dimuat dari Supabase.</span>';
-    if(cloudStatus) cloudStatus.textContent='⚠ Gagal memuat dari Supabase';
+    if(notice) notice.textContent='';
+    if(cloudStatus) cloudStatus.textContent='';
     if(btn) btn.disabled=true;
   }
 }
@@ -3191,7 +3188,6 @@ function buildReferralPdfPaper(item,no){
     row('Alamat',val('rAlamat'),{full:true}),
     row('Penanggung Jawab Pasien',val('rPenanggungJawab'),{full:true}),
     row('No HP',val('rNoHPPenanggungJawab')),
-    row('No. WhatsApp RS',val('rWhatsApp'))
   ]); if(sPatient.children.length>1) paper.appendChild(sPatient);
 
   const sClinical=section('Kondisi Klinis');
@@ -4227,10 +4223,9 @@ async function saveAnswer({silent=false}={}){
   const old=db.referrals[idx];
   const answerData=fields(ansFields);
   if(!String(answerData.aNoSurat||"").trim()){
-    // Jawaban boleh dikirim walau belum lengkap. Untuk arsip PDF gunakan nomor rujukan sebagai nomor jawaban sementara.
-    answerData.aNoSurat=String(old.answer?.aNoSurat||old.no||"");
-    const noField=document.getElementById("aNoSurat");
-    if(noField && !noField.value) noField.value=answerData.aNoSurat;
+    if(!silent) alert("No. Surat Jawaban Rujukan wajib diisi manual oleh RSUD.");
+    document.getElementById("aNoSurat")?.focus();
+    return false;
   }
   ensureAnswerResponseStarted(old);
   answerData.aWaktuRespons=document.getElementById("aWaktuRespons")?.value||answerData.aWaktuRespons||"";
@@ -4285,6 +4280,13 @@ async function sendAnswerBack(){
   db=loadDB();
   let item=db.referrals.find(x=>x.no===currentRef);
   if(!item){alert("Surat rujukan tidak ditemukan.");return;}
+
+  const manualAnswerNo=String(document.getElementById("aNoSurat")?.value||"").trim();
+  if(!manualAnswerNo){
+    alert("Isi No. Surat Jawaban Rujukan secara manual oleh RSUD terlebih dahulu.");
+    document.getElementById("aNoSurat")?.focus();
+    return;
+  }
 
   if(!answerFormComplete() && savedAnswerComplete(item)){
     hydrateSavedAnswerIntoForm(currentRef);
@@ -4499,75 +4501,91 @@ async function rejectReferral(){
   alert("Status No. "+old.no+" berhasil dicatat sebagai tidak dapat menerima.");
 }
 async function sendRequestedFileBack(){
+  if(window.__sendRequestedFileBusy) return;
   if(!currentRef){alert("Pilih surat rujukan terlebih dahulu.");return;}
-  db=loadDB();
-  const idx=db.referrals.findIndex(x=>x.no===currentRef);
-  if(idx<0){alert("Surat rujukan belum disimpan.");return;}
-  const item=db.referrals[idx];
-  const req={...(item.fileRequest||{})};
-  if(!req?.name){alert("Belum ada permintaan file dari RS.");return;}
-  const file=await getAnswerFileAttachment(currentRef);
-  if(!file){alert("Upload file yang diminta RS terlebih dahulu.");return;}
-  if(!file.storagePath || !file.metaPath){
-    alert("File balasan masih hanya tersimpan di perangkat ini. Upload ulang file agar tersimpan di Supabase.");
-    return;
-  }
+  window.__sendRequestedFileBusy=true;
+  const btn=document.getElementById('btnSendRequestedFile');
   try{
-    const existsFile=await cloudObjectExists(file.storagePath);
-    const existsMeta=await cloudObjectExists(file.metaPath);
-    if(!existsFile || !existsMeta) throw new Error("File balasan belum lengkap di Supabase.");
-  }catch(e){
-    alert("File belum dapat dikirim ke RS karena belum terverifikasi di Supabase. "+(e?.message||""));
-    return;
-  }
-  item.status="file_sent";
-  item.fileRequest.sentAt=new Date().toISOString();
-  item.fileRequest.sentFileName=file.name;
-  item.updatedAt=new Date().toISOString();
-  addRequestedReplyHistory(item,{type:'file',request:req.name||req.message||'Permintaan file/informasi',fileName:file.name,filePath:file.storagePath,metaPath:file.metaPath,createdAt:item.fileRequest.sentAt,sourceRole:'Puskesmas Lanjut',status:'sent'});
-  addPartyNotification(item,"sender",`File "${file.name}" dikirim kembali ke RS untuk permintaan: ${req.name}.`,"ok");
-  saveDB(db);
-  const synced=await syncReferralNow(currentRef);
-  if(!synced){
-    alert("File sudah ditandai dikirim di perangkat ini, tetapi status belum tersinkron ke Supabase. Ulangi setelah koneksi pulih.");
-    return;
-  }
-  try{
+    db=loadDB();
+    const idx=db.referrals.findIndex(x=>x.no===currentRef);
+    if(idx<0){alert("Surat rujukan belum disimpan.");return;}
+    const item=db.referrals[idx];
+    const req={...(item.fileRequest||{})};
+    if(!req?.name){alert("Belum ada permintaan file dari RS.");return;}
+    if(req.sentAt || item.requestFileReturnSentAt || item.status==='file_sent'){
+      if(btn){btn.disabled=true;btn.textContent='Sudah Dikirim';}
+      alert("File untuk permintaan RS ini sudah pernah dikirim. Pengiriman ganda tidak diperbolehkan.");
+      return;
+    }
+    const file=await getAnswerFileAttachment(currentRef);
+    if(!file){alert("Upload file yang diminta RS terlebih dahulu.");return;}
+    if(!file.storagePath || !file.metaPath){
+      alert("File balasan masih hanya tersimpan di perangkat ini. Upload ulang file agar tersimpan di Supabase.");
+      return;
+    }
+    try{
+      const existsFile=await cloudObjectExists(file.storagePath);
+      const existsMeta=await cloudObjectExists(file.metaPath);
+      if(!existsFile || !existsMeta) throw new Error("File balasan belum lengkap di Supabase.");
+    }catch(e){
+      alert("File belum dapat dikirim ke RS karena belum terverifikasi di Supabase. "+(e?.message||""));
+      return;
+    }
+
+    // Kunci idempotensi sebelum sync/event agar double-click tidak menghasilkan dua pengiriman.
+    const sentAt=new Date().toISOString();
+    item.status="file_sent";
+    item.fileRequest.sentAt=sentAt;
+    item.fileRequest.sentFileName=file.name;
+    item.requestFileReturnSentAt=sentAt;
+    item.updatedAt=sentAt;
+    addRequestedReplyHistory(item,{
+      type:'file',request:req.name||req.message||'Permintaan file/informasi',
+      fileName:file.name,filePath:file.storagePath,metaPath:file.metaPath,
+      createdAt:sentAt,sourceRole:'Puskesmas Lanjut',status:'sent'
+    });
+    saveDB(db);
+
+    const synced=await syncReferralNow(currentRef);
+    if(!synced){
+      alert("File sudah ditandai dikirim, tetapi status belum tersinkron ke Supabase. Jangan tekan Kirim Kembali lagi; lakukan sinkronisasi setelah koneksi pulih.");
+      if(btn){btn.disabled=true;btn.textContent='Sudah Dikirim';}
+      return;
+    }
+
     await publishReceiverEventNotification(item,{
       type:"file_return",
-      replyId:`reply_file_${cloudSafeNo(item.no)}_${item.fileRequest.sentAt}`,
+      replyId:`reply_file_${cloudSafeNo(item.no)}_${sentAt}`,
       fileName:file.name,
       filePath:file.storagePath,
       metaPath:file.metaPath,
       request:req.name,
       notification:`File yang diminta RS sudah dikirim kembali dari UPTD untuk No. ${item.no}: ${file.name}`
     });
-  }catch(e){
-    alert("File sudah tersimpan dan status tersinkron, tetapi notifikasi cloud belum terbentuk. "+(e?.message||""));
-    return;
+
+    // Tutup instruksi aktif. Riwayat balasan tetap dipertahankan.
+    db=loadDB();
+    const live=db.referrals.find(x=>x.no===currentRef);
+    if(live){
+      closeFileRequestState(live,sentAt);
+      live.requestFileReturnSentAt=live.requestFileReturnSentAt||sentAt;
+      live.updatedAt=sentAt;
+      saveDB(db);
+      await syncReferralNow(currentRef);
+    }
+    await purgeResolvedFileRequestCloud(currentRef);
+    broadcastReferral(currentRef,`File balasan ${file.name} berhasil dikirim kembali.`);
+    await renderRequestedReplyFile(currentRef);
+    await renderAnswerFile(currentRef);
+    renderList(); renderCurrentStatus(); renderDashboard();
+    if(btn){btn.disabled=true;btn.textContent='Sudah Dikirim';}
+    alert("File untuk No. "+item.no+" berhasil dikirim kembali. File hanya dapat dikirim satu kali untuk instruksi RS ini.");
+  }catch(err){
+    console.error('Pengiriman file balasan gagal',err);
+    alert("Pengiriman file balasan gagal: "+(err?.message||String(err)));
+  }finally{
+    window.__sendRequestedFileBusy=false;
   }
-  // File kembali berhasil terkirim: tutup instruksi aktif dan hapus delivery
-  // instruksi lama agar tidak muncul kembali pada HP/perangkat lain.
-  db=loadDB();
-  const live=db.referrals.find(x=>x.no===currentRef);
-  if(live){
-    const closedAt=live.fileRequest?.sentAt||new Date().toISOString();
-    closeFileRequestState(live,closedAt);
-    live.updatedAt=closedAt;
-    saveDB(db);
-    await syncReferralNow(currentRef);
-  }
-  await purgeResolvedFileRequestCloud(currentRef);
-  broadcastReferral(currentRef,`File balasan ${file.name} berhasil dikirim kembali.`);
-  renderList();
-  renderCurrentStatus();
-  await renderRequestedReplyFile(currentRef);
-  await renderAnswerFile(currentRef);
-  const rsNo=item.rWhatsApp||getDefaultWhatsApp();
-  if(rsNo){
-    openWhatsAppTo(rsNo,`NOTIFIKASI FILE RUJUKAN\nNo: ${item.no}\nTanggal/Waktu: ${formatNotificationDateTime(item.fileRequest.sentAt)}\nPermintaan RS: ${req.name}\nFile dikirim kembali: ${file.name}\nFile tersedia di Supabase dan dapat dibuka dari Form Jawaban Rujukan.`);
-  }
-  alert("File untuk No. "+item.no+" berhasil dikirim kembali dan tersinkron ke Supabase.");
 }
 
 async function sendToWhatsApp(){
