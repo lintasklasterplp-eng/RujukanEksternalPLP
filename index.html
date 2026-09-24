@@ -1786,6 +1786,35 @@ async function publishSenderDeliveryNotification(item,payload={}){
   await cloudUpload(path,JSON.stringify(body),"application/json");
   return {path,delivery:body};
 }
+function ensureRequestedReplyHistory(item){
+  if(!item) return [];
+  if(!Array.isArray(item.requestedReplies)) item.requestedReplies=[];
+  return item.requestedReplies;
+}
+function addRequestedReplyHistory(item,entry){
+  if(!item || !entry) return null;
+  const list=ensureRequestedReplyHistory(item);
+  const normalized={
+    id:entry.id||`reply_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+    type:entry.type||"note",
+    no:item.no,
+    request:entry.request||"",
+    message:entry.message||"",
+    fileName:entry.fileName||"",
+    filePath:entry.filePath||"",
+    metaPath:entry.metaPath||"",
+    createdAt:entry.createdAt||new Date().toISOString(),
+    sourceRole:entry.sourceRole||"Puskesmas Lanjut",
+    status:entry.status||"sent"
+  };
+  const duplicate=list.some(x=>String(x.id||"")===String(normalized.id)||
+    (String(x.type||"")===String(normalized.type)&&String(x.createdAt||"")===String(normalized.createdAt)&&
+     String(x.fileName||"")===String(normalized.fileName||"")&&String(x.message||"")===String(normalized.message||"")));
+  if(!duplicate) list.push(normalized);
+  list.sort((a,b)=>new Date(a.createdAt||0)-new Date(b.createdAt||0));
+  return normalized;
+}
+
 async function publishReceiverEventNotification(item,payload={}){
   if(!item?.no) throw new Error("Nomor rujukan belum tersedia untuk notifikasi RS.");
   const token=`${cloudSafeNo(item.no)}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
@@ -1814,15 +1843,27 @@ async function hydrateReceiverEventNotifications(){
           item.notifications.push({message,type:"info",createdAt,party:"receiver",deliveryPath});
         }
         activateNotificationForNo(item.no,"receiver",createdAt);
-        item.fileRequest=item.fileRequest||{};
-        if(delivery.type==="request_reply" && delivery.responseMessage){ item.fileRequest.responseMessage=delivery.responseMessage; item.fileRequest.responseMessageAt=createdAt; }
-        if(delivery.type==="file_ready" && delivery.fileName){ item.fileRequest.responseFileName=delivery.fileName; item.fileRequest.fileReadyAt=createdAt; }
-        if(delivery.type==="file_return" && delivery.fileName){ item.fileRequest.sentFileName=delivery.fileName; item.fileRequest.sentAt=createdAt; }
+        const replyType=delivery.type==="request_reply" ? "note" : ((delivery.type==="file_return" || delivery.type==="file_ready") ? "file" : "");
+        if(replyType){
+          addRequestedReplyHistory(item,{
+            id:delivery.replyId||`remote_${row.name}`,
+            type:replyType,
+            request:delivery.request||"Permintaan file/informasi",
+            message:delivery.responseMessage||"",
+            fileName:delivery.fileName||"",
+            filePath:delivery.filePath||"",
+            metaPath:delivery.metaPath||"",
+            createdAt,
+            sourceRole:"Puskesmas Lanjut",
+            status:delivery.type==="file_return"?"sent":"ready"
+          });
+        }
         saveDB(db);
       }catch(e){ console.warn("Notifikasi event RS gagal dimuat",row.name,e); }
     }
   }catch(e){ console.warn("Daftar notifikasi event RS belum dapat dimuat",e); }
   renderRoleNotificationCenter();
+  if(getRoleNotificationParty()==="receiver" && currentRef) await renderAnswerFile(currentRef).catch(()=>{});
 }
 
 async function purgeResolvedFileRequestCloud(no){
@@ -2307,21 +2348,38 @@ async function getAnswerFileAttachment(no){
   return rows.find(x=>x.kind==='answer-file') || null;
 }
 async function renderAnswerFile(no){
-  const el=document.getElementById('answerFileList');
+  const el=document.getElementById("answerFileList");
   if(!el) return;
-  if(!no){el.innerHTML='<div class="help">Belum ada file balasan.</div>';return;}
+  if(!no){el.innerHTML='<div class="help">Belum ada balasan dari UPTD.</div>';return;}
   try{
-    const x=await getAnswerFileAttachment(no);
-    if(!x){el.innerHTML='<div class="help">Belum ada file balasan dari UPTD.</div>';return;}
-    el.innerHTML=`<div class="attachment-item">
-      <div class="attachment-name" title="${escapeHtml(x.name)}"><span class="soap-badge">FILE</span> ${escapeHtml(x.name)} <span class="help">(${formatFileSize(x.size)})</span></div>
-      <div><button type="button" class="btn-secondary" onclick="openAttachment('${encodeURIComponent(x.id)}')">Buka</button></div>
-    </div>`;
+    db=loadDB();
+    const item=db.referrals.find(x=>String(x.no)===String(no));
+    const history=[...(item?.requestedReplies||[])].sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
+    const currentFile=await getAnswerFileAttachment(no);
+    const rows=[];
+    history.forEach(reply=>{
+      const isFile=reply.type==="file";
+      const when=formatNotificationDateTime(reply.createdAt);
+      const isCurrentFile=isFile && currentFile && (String(reply.fileName||"")===String(currentFile.name||"") || String(reply.filePath||"")===String(currentFile.storagePath||""));
+      rows.push(`
+        <div class="attachment-item" style="border-left:4px solid ${isFile?"#0f766e":"#2563eb"}">
+          <div class="attachment-name"><span class="soap-badge">${isFile?"FILE":"CATATAN"}</span> ${escapeHtml(isFile?(reply.fileName||"File balasan dari UPTD"):"Balasan / Catatan UPTD")}</div>
+          <div class="help">${escapeHtml(when)} · Permintaan RS: ${escapeHtml(reply.request||"-")}</div>
+          ${isFile
+            ? `<div class="help" style="margin-top:5px">${escapeHtml(reply.fileName||"File")} ${isCurrentFile?"· tersimpan di Supabase":""}</div>${isCurrentFile?`<button type="button" class="btn-secondary" style="margin-top:6px" onclick="openAttachment('${encodeURIComponent(currentFile.id)}')">Buka File</button>`:""}`
+            : `<div style="margin-top:7px;white-space:pre-wrap;line-height:1.35">${escapeHtml(reply.message||"-")}</div>`}
+        </div>`);
+    });
+    if(currentFile && !history.some(r=>r.type==="file" && (String(r.fileName||"")===String(currentFile.name||"") || String(r.filePath||"")===String(currentFile.storagePath||"")))){
+      rows.unshift(`<div class="attachment-item" style="border-left:4px solid #0f766e"><div class="attachment-name"><span class="soap-badge">FILE</span> ${escapeHtml(currentFile.name||"File balasan dari UPTD")}</div><div class="help">${formatNotificationDateTime(currentFile.createdAt||Date.now())} · tersimpan di Supabase</div><button type="button" class="btn-secondary" style="margin-top:6px" onclick="openAttachment('${encodeURIComponent(currentFile.id)}')">Buka File</button></div>`);
+    }
+    el.innerHTML=rows.length?rows.join(""):'<div class=\"help\">Belum ada file atau catatan balasan dari UPTD Puskesmas.</div>';
   }catch(err){
     console.error(err);
-    el.innerHTML='<div class="help">File balasan belum dapat dimuat.</div>';
+    el.innerHTML='<div class="help">File/catatan balasan UPTD belum dapat dimuat.</div>';
   }
 }
+
 async function sendRequestedReplyMessage(){
   if(!currentRef){alert("Pilih surat rujukan terlebih dahulu.");return;}
   const input=document.getElementById('requestedReplyMessage');
@@ -2335,6 +2393,7 @@ async function sendRequestedReplyMessage(){
   const closedAt=new Date().toISOString();
   item.status=item.status==='completed'?'completed':'request_replied';
   item.updatedAt=closedAt;
+  addRequestedReplyHistory(item,{type:'note',request:activeRequest.name||activeRequest.message||'Permintaan file/informasi',message:msg,createdAt:closedAt,sourceRole:'Puskesmas Lanjut',status:'sent'});
   addPartyNotification(item,'sender',`Balasan instruksi tersimpan untuk No. ${item.no}.`,'ok');
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
@@ -2345,6 +2404,7 @@ async function sendRequestedReplyMessage(){
   try{
     await publishReceiverEventNotification(item,{
       type:"request_reply",
+      replyId:`reply_note_${cloudSafeNo(item.no)}_${closedAt}`,
       request:activeRequest.name||activeRequest.message||"Permintaan file/informasi",
       responseMessage:msg,
       notification:`Balasan Puskesmas untuk instruksi RS pada No. ${item.no}: ${msg}`
@@ -3638,6 +3698,7 @@ async function handleRealtimeReferralEvent(payload){
       await hydrateReceiverEventNotifications().catch(()=>{});
       await hydrateSenderDeliveryNotifications().catch(()=>{});
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();renderRoleNotificationCenter();
+      if(payload.no && getRoleNotificationParty()==="receiver") await renderAnswerFile(payload.no).catch(()=>{});
       if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message,payload.updatedAt||Date.now());
     }
   }catch(err){console.warn("Realtime notification handler gagal",err);}
@@ -4293,6 +4354,7 @@ async function sendRequestedFileBack(){
   item.fileRequest.sentAt=new Date().toISOString();
   item.fileRequest.sentFileName=file.name;
   item.updatedAt=new Date().toISOString();
+  addRequestedReplyHistory(item,{type:'file',request:req.name||req.message||'Permintaan file/informasi',fileName:file.name,filePath:file.storagePath,metaPath:file.metaPath,createdAt:item.fileRequest.sentAt,sourceRole:'Puskesmas Lanjut',status:'sent'});
   addPartyNotification(item,"sender",`File "${file.name}" dikirim kembali ke RS untuk permintaan: ${req.name}.`,"ok");
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
@@ -4303,6 +4365,7 @@ async function sendRequestedFileBack(){
   try{
     await publishReceiverEventNotification(item,{
       type:"file_return",
+      replyId:`reply_file_${cloudSafeNo(item.no)}_${item.fileRequest.sentAt}`,
       fileName:file.name,
       filePath:file.storagePath,
       metaPath:file.metaPath,
