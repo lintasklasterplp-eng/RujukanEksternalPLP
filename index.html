@@ -2788,7 +2788,7 @@ document.getElementById('rLampiran').addEventListener('change', async function()
       await saveAttachmentRecord({
         id:`${currentRef}::${Date.now()}::${Math.random().toString(36).slice(2)}`,
         refNo:currentRef,name:file.name,size:file.size,type:file.type||'application/octet-stream',
-        dataUrl,createdAt:new Date().toISOString(),referralCreatedAt:item.createdAt||new Date().toISOString()
+        dataUrl,createdAt:new Date().toISOString(),referralCreatedAt:(db.referrals.find(x=>String(x.no||'')===String(currentRef))?.createdAt||new Date().toISOString())
       });
       uploaded.push(file.name);
     }catch(err){ console.error(err); alert('Gagal menyimpan file '+file.name); }
