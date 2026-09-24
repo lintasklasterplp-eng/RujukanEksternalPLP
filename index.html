@@ -1191,6 +1191,7 @@ const SUPABASE_PDF_PREFIX="pdf";
 const SUPABASE_ATTACHMENT_PREFIX="attachments";
 const SUPABASE_ATTACHMENT_META_PREFIX="attachment-meta";
 const SUPABASE_RECEIVER_NOTIFICATION_PREFIX="notifications/receiver";
+const SUPABASE_SENDER_NOTIFICATION_PREFIX="notifications/sender";
 let supabasePollTimer=null;
 let supabaseHydrating=false;
 let supabaseLastError="";
@@ -1441,6 +1442,87 @@ async function downloadReceiverDelivery(no){
   const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(no)}.json`;
   return await cloudDownloadJson(path);
 }
+async function downloadReceiverDelivery(no){
+  const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(no)}.json`;
+  return await cloudDownloadJson(path);
+}
+async function publishSenderDeliveryNotification(item,payload={}){
+  if(!item?.no) throw new Error("Nomor rujukan belum tersedia untuk notifikasi pengirim.");
+  const token=`${cloudSafeNo(item.no)}_${Date.now()}`;
+  const path=`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/${token}.json`;
+  const body={
+    status:"ready",
+    no:item.no,
+    recordPath:`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,
+    sentAt:new Date().toISOString(),
+    ...payload
+  };
+  await cloudUpload(path,JSON.stringify(body),"application/json");
+  return {path,delivery:body};
+}
+async function hydrateSenderDeliveryNotifications(){
+  try{
+    let rows=await cloudList(SUPABASE_SENDER_NOTIFICATION_PREFIX);
+    const deliveries=[];
+    for(const row of (rows||[]).filter(x=>String(x.name||"").endsWith(".json"))){
+      try{
+        const delivery=await cloudDownloadJson(`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/${row.name}`);
+        if(delivery?.no && delivery.status==="ready") deliveries.push({delivery,row});
+      }catch(e){console.warn("Notifikasi pengirim gagal dimuat",row.name,e);}
+    }
+    if(deliveries.length){
+      const missing=deliveries.some(({delivery})=>!loadDB().referrals.some(x=>x.no===delivery.no));
+      if(missing) await hydrateSupabaseReferrals().catch(()=>{});
+    }
+    for(const {delivery,row} of deliveries){
+      db=loadDB();
+      const item=db.referrals.find(x=>x.no===delivery.no);
+      if(!item) continue;
+      item.partyNotifications=item.partyNotifications||{sender:[],receiver:[]};
+      item.partyNotifications.sender=item.partyNotifications.sender||[];
+      const deliveryPath=`${SUPABASE_SENDER_NOTIFICATION_PREFIX}/${row.name}`;
+      const message=delivery.notification||"Ada pembaruan rujukan untuk pengirim.";
+      const exists=item.partyNotifications.sender.some(n=>String(n.deliveryPath||"")===deliveryPath);
+      if(!exists){
+        item.partyNotifications.sender.push({
+          id:`delivery_${row.name}`,
+          message,
+          type:delivery.type==="answer_return"?"ok":delivery.type==="file_return"?"ok":"info",
+          createdAt:delivery.sentAt||new Date().toISOString(),
+          deliveryPath
+        });
+        item.notifications=item.notifications||[];
+        item.notifications.push({message,type:"info",createdAt:delivery.sentAt||new Date().toISOString(),party:"sender",deliveryPath});
+      }
+      if(delivery.type==="answer_return"){
+        item.answer=item.answer||{};
+        if(delivery.pdfPath) item.answer.pdfStoragePath=delivery.pdfPath;
+        if(delivery.pdfFilename) item.answer.pdfFilename=delivery.pdfFilename;
+        item.answer.sentBackAt=delivery.sentAt||item.answer.sentBackAt;
+        item.answer.statusText="Sudah dikirim kembali";
+        item.status="completed";
+      }else if(delivery.type==="file_return"){
+        item.fileRequest=item.fileRequest||{};
+        item.fileRequest.sentFileName=delivery.fileName||item.fileRequest.sentFileName;
+        item.fileRequest.sentAt=delivery.sentAt||item.fileRequest.sentAt;
+        item.status="file_sent";
+      }else if(delivery.type==="file_request"){
+        item.fileRequest=item.fileRequest||{};
+        if(delivery.request) item.fileRequest.name=delivery.request;
+        item.fileRequest.createdAt=delivery.sentAt||item.fileRequest.createdAt;
+        item.status="request_file";
+      }else if(delivery.type==="request_reply"){
+        item.fileRequest=item.fileRequest||{};
+        if(delivery.request) item.fileRequest.name=delivery.request;
+        if(delivery.responseMessage) item.fileRequest.responseMessage=delivery.responseMessage;
+        item.fileRequest.responseMessageAt=delivery.sentAt||item.fileRequest.responseMessageAt;
+        item.status="request_replied";
+      }
+      saveDB(db);
+    }
+  }catch(e){console.warn("Daftar delivery sender belum dapat dimuat",e);}
+  renderGlobalIncomingNotification(); renderList(); renderCurrentStatus();
+}
 async function uploadPdfToSupabase(no,blob,filename,kind,{publishRecord=true}={}){
   await verifyPdfBlob(blob,kind==="answer"?"PDF Jawaban":"PDF Surat Rujukan");
   const path=`${SUPABASE_PDF_PREFIX}/${kind}/${cloudSafeNo(no)}.pdf`;
@@ -1526,6 +1608,7 @@ function startSupabasePolling(){
     if(document.visibilityState==="hidden") return;
     await hydrateSupabaseReferrals().catch(()=>{});
     await hydrateReceiverDeliveryNotifications().catch(()=>{});
+    await hydrateSenderDeliveryNotifications().catch(()=>{});
     renderList();
   },12000);
 }
@@ -1621,29 +1704,40 @@ async function deleteArchive(no){
 async function saveAttachmentRecord(record){
   const idb=await openArchiveDB();
   await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readwrite');tx.objectStore('attachments').put(record);tx.oncomplete=()=>{idb.close();resolve();};tx.onerror=()=>{idb.close();reject(tx.error);};});
+  if(!record?.refNo || !record?.dataUrl) return {cloudSynced:false,localOnly:true};
+
   try{
-    if(record?.refNo && record?.dataUrl){
-      const base=`${SUPABASE_ATTACHMENT_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}`;
-      const storagePath=`${base}${fileExt(record.name,record.type)}`;
-      const metaPath=`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}.json`;
-      await cloudUpload(storagePath,dataUrlToBlob(record.dataUrl),record.type||"application/octet-stream");
-      const meta={...record,storagePath,metaPath};delete meta.dataUrl;
-      await cloudUpload(metaPath,JSON.stringify(meta),"application/json");
-      remoteAttachmentCache.delete(record.refNo);
-      const attachmentLabel=record.kind==='soap'?'SOAP':record.kind==='answer-file'?'File balasan':'Lampiran Penunjang Rujukan';
-      await publishSupabaseRealtime("referral_update",{
-        kind:"attachment_updated",
-        no:record.refNo,
-        attachmentId:record.id,
-        attachmentName:record.name,
-        attachmentKind:record.kind||"attachment",
-        updatedAt:new Date().toISOString(),
-        message:`${attachmentLabel} baru tersedia: ${record.name}`
-      });
-      const idb2=await openArchiveDB();
-      await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');const local={...record,storagePath,metaPath};tx.objectStore('attachments').put(local);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
-    }
-  }catch(e){supabaseLastError=e?.message||String(e);console.warn("Lampiran lokal tersimpan, cloud belum tersinkron",e);}
+    const base=`${SUPABASE_ATTACHMENT_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}`;
+    const storagePath=`${base}${fileExt(record.name,record.type)}`;
+    const metaPath=`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}.json`;
+    await cloudUpload(storagePath,dataUrlToBlob(record.dataUrl),record.type||"application/octet-stream");
+    const meta={...record,storagePath,metaPath}; delete meta.dataUrl;
+    await cloudUpload(metaPath,JSON.stringify(meta),"application/json");
+    await cloudObjectExists(storagePath);
+    await cloudObjectExists(metaPath);
+    remoteAttachmentCache.delete(record.refNo);
+
+    const attachmentLabel=record.kind==='soap'?'SOAP':record.kind==='answer-file'?'File balasan':'Lampiran Penunjang Rujukan';
+    await publishSupabaseRealtime("referral_update",{
+      kind:"attachment_updated",
+      no:record.refNo,
+      attachmentId:record.id,
+      attachmentName:record.name,
+      attachmentKind:record.kind||"attachment",
+      updatedAt:new Date().toISOString(),
+      message:`${attachmentLabel} baru tersedia: ${record.name}`
+    });
+
+    const idb2=await openArchiveDB();
+    await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');const local={...record,storagePath,metaPath,cloudSynced:true};tx.objectStore('attachments').put(local);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
+    return {cloudSynced:true,storagePath,metaPath};
+  }catch(e){
+    supabaseLastError=e?.message||String(e);
+    console.warn("Lampiran cloud belum tersinkron",e);
+    // File balasan yang akan dikirim lintas perangkat WAJIB berada di Supabase.
+    if(String(record.kind||'')==='answer-file') throw e;
+    return {cloudSynced:false,localOnly:true,error:e};
+  }
 }
 async function getAttachments(no){
   const idb=await openArchiveDB();
@@ -1766,8 +1860,23 @@ async function sendRequestedReplyMessage(){
   addPartyNotification(item,'receiver',`Balasan atas instruksi RS untuk No. ${item.no}: ${msg}`,'info');
   addPartyNotification(item,'sender',`Balasan instruksi tersimpan untuk No. ${item.no}.`,'ok');
   saveDB(db);
-  await syncReferralNow(currentRef);
-  broadcastReferral(currentRef);
+  const synced=await syncReferralNow(currentRef);
+  if(!synced){
+    alert('Balasan instruksi tersimpan di perangkat ini, tetapi belum tersinkron ke Supabase.');
+    return;
+  }
+  try{
+    await publishSenderDeliveryNotification(item,{
+      type:"request_reply",
+      request:item.fileRequest.name||"Permintaan file/informasi",
+      responseMessage:msg,
+      notification:`Balasan pengirim untuk instruksi RS pada No. ${item.no}: ${msg}`
+    });
+  }catch(e){
+    alert('Balasan sudah tersimpan, tetapi notifikasi cloud belum terbentuk: '+(e?.message||''));
+    return;
+  }
+  broadcastReferral(currentRef,`Balasan instruksi RS untuk No. ${item.no} telah dikirim.`);
   const status=document.getElementById('requestedReplyMessageStatus');
   if(status) status.textContent='Balasan sudah dikirim ke RS dan tersimpan pada data rujukan.';
   await renderRequestedReplyFile(currentRef);
@@ -1871,8 +1980,12 @@ document.getElementById('requestedFileUpload').addEventListener('change', async 
       addPartyNotification(live,'sender',`File balasan sudah siap: ${file.name}. Tekan Kirim Kembali untuk mengirim ke RS.`,'ok');
       addPartyNotification(live,'receiver',`File balasan untuk permintaan "${live.fileRequest.name}" sudah disiapkan: ${file.name}.`,'info');
       saveDB(db);
-      await syncReferralNow(currentRef);
-      broadcastReferral(currentRef);
+      const synced=await syncReferralNow(currentRef);
+      if(!synced){
+        alert('File sudah diunggah ke Supabase, tetapi status file_ready belum tersinkron. Ulangi sinkronisasi setelah koneksi pulih.');
+        return;
+      }
+      broadcastReferral(currentRef,`File balasan ${file.name} sudah siap dikirim.`);
       const rsNo=live.rWhatsApp||getDefaultWhatsApp();
       if(rsNo){
         openWhatsAppTo(rsNo,`NOTIFIKASI RUJUKAN\nNo: ${currentRef}\nFile untuk permintaan "${live.fileRequest.name}" sudah disiapkan: ${file.name}.\nMenunggu dikirim kembali oleh UPTD Puskesmas.`);
@@ -2802,6 +2915,7 @@ async function handleRealtimeReferralEvent(payload){
     if(payload.kind==="record_updated"){
       await hydrateSupabaseReferrals().catch(()=>{});
       await hydrateReceiverDeliveryNotifications().catch(()=>{});
+      await hydrateSenderDeliveryNotifications().catch(()=>{});
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();
       if(payload.no) await renderIncomingReferralAttachments(payload.no);
       if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message);
@@ -2858,15 +2972,7 @@ function addPartyNotification(item,party,message,type="info"){
   const note={id:`n_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,message,type,createdAt:new Date().toISOString()};
   item.partyNotifications[party].push(note);
   item.notifications.push({...note,party});
-  publishSupabaseRealtime("referral_notification",{
-    kind:"notification",
-    eventId:realtimeEventId(item.no,party,note),
-    no:item.no,
-    party,
-    note,
-    status:item.status||"",
-    updatedAt:item.updatedAt||new Date().toISOString()
-  });
+  // Realtime dipancarkan setelah record berhasil disinkronkan oleh pemanggil.
   return note;
 }
 function openWhatsAppTo(number,message){
@@ -3180,20 +3286,15 @@ async function saveAnswer({silent=false}={}){
   return true;
 }
 async function publishAnswerReturnNotification(item){
-  if(!item?.no) return false;
-  const path=`notifications/sender/${cloudSafeNo(item.no)}.json`;
-  const payload={
+  if(!item?.no) throw new Error("Nomor rujukan belum tersedia.");
+  const result=await publishSenderDeliveryNotification(item,{
     type:"answer_return",
-    status:"ready",
-    no:item.no,
-    recordPath:`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,
     pdfPath:item.answer?.pdfStoragePath||`${SUPABASE_PDF_PREFIX}/answer/${cloudSafeNo(item.no)}.pdf`,
     pdfFilename:item.answer?.pdfFilename||`Jawaban_Rujukan_${String(item.no).replaceAll('/','-')}.pdf`,
     sentAt:item.answer?.sentBackAt||new Date().toISOString(),
     notification:"Jawaban rujukan sudah dikirim kembali oleh fasilitas penerima."
-  };
-  await cloudUpload(path,JSON.stringify(payload),"application/json");
-  return path;
+  });
+  return result.path;
 }
 function updateAnswerActionButtons(){
   const reqBtn=document.getElementById('btnRequestFile');
@@ -3257,22 +3358,23 @@ async function sendAnswerBack(){
   addPartyNotification(live,"receiver","Jawaban rujukan berhasil dikirim kembali ke UPTD Puskesmas.","ok");
   live.updatedAt=new Date().toISOString();
   saveDB(db);
-  broadcastReferral(currentRef);
-  renderList();
-  renderCurrentStatus();
-  updateSendAnswerButton();
 
   const synced=await syncReferralNow(currentRef);
   if(!synced){
-    alert("Jawaban Rujukan No. "+currentRef+" belum selesai dikirim. Tekan Kirim Rujukan Balik lagi.");
+    alert("Jawaban Rujukan No. "+currentRef+" belum selesai dikirim ke Supabase. Ulangi setelah koneksi pulih.");
     return;
   }
 
   try{
     await publishAnswerReturnNotification(live);
   }catch(e){
-    console.warn("Notifikasi jawaban balik gagal dikirim:",e);
+    alert("Jawaban sudah tersinkron, tetapi notifikasi cloud belum terbentuk: "+(e?.message||""));
+    return;
   }
+  broadcastReferral(currentRef,"Jawaban rujukan berhasil dikirim kembali ke UPTD Puskesmas.");
+  renderList();
+  renderCurrentStatus();
+  updateSendAnswerButton();
 
   const senderNo=getSenderWhatsApp();
   if(senderNo){
@@ -3328,17 +3430,34 @@ async function confirmFileRequest(){
   addPartyNotification(old,"sender",`Pesan/permintaan dari RS: ${request}`,"warn");
   addPartyNotification(old,"receiver",`Pesan/permintaan RS dicatat: ${request}`,"info");
   saveDB(db);
-  await syncReferralNow(currentRef);
-  broadcastReferral(currentRef);
+  const synced=await syncReferralNow(currentRef);
+  if(!synced){
+    broadcastReferral(currentRef,"Permintaan file belum tersinkron ke Supabase.");
+    renderList(); renderCurrentStatus();
+    alert("Permintaan file sudah tersimpan di perangkat ini, tetapi BELUM tersimpan ke Supabase. Periksa koneksi/bucket lalu ulangi.");
+    return;
+  }
+  try{
+    await publishSenderDeliveryNotification(old,{
+      type:"file_request",
+      request,
+      notification:`RS meminta file/informasi untuk No. ${old.no}: ${request}`
+    });
+  }catch(e){
+    console.warn("Delivery permintaan file gagal:",e);
+    alert("Permintaan file tersimpan, tetapi notifikasi cloud belum terbentuk. Coba ulangi pengiriman notifikasi.");
+    return;
+  }
+  broadcastReferral(currentRef,`RS meminta file/informasi: ${request}`);
   renderList();
   renderCurrentStatus();
   closeFileRequest();
-  renderRequestedReplyFile(currentRef);
+  await renderRequestedReplyFile(currentRef);
   const senderNo=getSenderWhatsApp();
   if(senderNo){
     openWhatsAppTo(senderNo,`NOTIFIKASI PESAN / PERMINTAAN RS\nNo: ${old.no}\nPesan/permintaan: ${request}\nDokter penerima: ${old.answer.aDokter||"-"}`);
   }
-  alert("Permintaan file/pesan untuk No. "+old.no+" berhasil dikirim.");
+  alert("Permintaan file/pesan untuk No. "+old.no+" berhasil dikirim dan tersinkron ke Supabase.");
 }
 async function accReferral(){
   if(!currentRef){alert("Pilih surat rujukan masuk terlebih dahulu.");return;}
@@ -3406,6 +3525,18 @@ async function sendRequestedFileBack(){
   if(!req?.name){alert("Belum ada permintaan file dari RS.");return;}
   const file=await getAnswerFileAttachment(currentRef);
   if(!file){alert("Upload file yang diminta RS terlebih dahulu.");return;}
+  if(!file.storagePath || !file.metaPath){
+    alert("File balasan masih hanya tersimpan di perangkat ini. Upload ulang file agar tersimpan di Supabase.");
+    return;
+  }
+  try{
+    const existsFile=await cloudObjectExists(file.storagePath);
+    const existsMeta=await cloudObjectExists(file.metaPath);
+    if(!existsFile || !existsMeta) throw new Error("File balasan belum lengkap di Supabase.");
+  }catch(e){
+    alert("File belum dapat dikirim ke RS karena belum terverifikasi di Supabase. "+(e?.message||""));
+    return;
+  }
   item.status="file_sent";
   item.fileRequest.sentAt=new Date().toISOString();
   item.fileRequest.sentFileName=file.name;
@@ -3413,17 +3544,33 @@ async function sendRequestedFileBack(){
   addPartyNotification(item,"sender",`File "${file.name}" dikirim kembali ke RS untuk permintaan: ${req.name}.`,"ok");
   addPartyNotification(item,"receiver",`File "${file.name}" telah dikirim kembali dari UPTD untuk permintaan: ${req.name}.`,"ok");
   saveDB(db);
-  await syncReferralNow(currentRef);
-  broadcastReferral(currentRef);
+  const synced=await syncReferralNow(currentRef);
+  if(!synced){
+    alert("File sudah ditandai dikirim di perangkat ini, tetapi status belum tersinkron ke Supabase. Ulangi setelah koneksi pulih.");
+    return;
+  }
+  try{
+    await publishSenderDeliveryNotification(item,{
+      type:"file_return",
+      fileName:file.name,
+      filePath:file.storagePath,
+      metaPath:file.metaPath,
+      notification:`File balasan "${file.name}" telah dikirim kembali dari UPTD Puskesmas untuk No. ${item.no}.`
+    });
+  }catch(e){
+    alert("File sudah tersimpan dan status tersinkron, tetapi notifikasi cloud belum terbentuk. "+(e?.message||""));
+    return;
+  }
+  broadcastReferral(currentRef,`File balasan ${file.name} berhasil dikirim kembali.`);
   renderList();
   renderCurrentStatus();
   await renderRequestedReplyFile(currentRef);
   await renderAnswerFile(currentRef);
   const rsNo=item.rWhatsApp||getDefaultWhatsApp();
   if(rsNo){
-    openWhatsAppTo(rsNo,`NOTIFIKASI FILE RUJUKAN\nNo: ${item.no}\nPermintaan RS: ${req.name}\nFile dikirim kembali: ${file.name}\nSilakan buka Jawaban Rujukan untuk melihat/membuka file yang dikirim.`);
+    openWhatsAppTo(rsNo,`NOTIFIKASI FILE RUJUKAN\nNo: ${item.no}\nPermintaan RS: ${req.name}\nFile dikirim kembali: ${file.name}\nFile tersedia di Supabase dan dapat dibuka dari Form Jawaban Rujukan.`);
   }
-  alert("File untuk No. "+item.no+" berhasil dikirim kembali.");
+  alert("File untuk No. "+item.no+" berhasil dikirim kembali dan tersinkron ke Supabase.");
 }
 
 async function sendToWhatsApp(){
@@ -3722,6 +3869,7 @@ initSupabaseRealtime().catch(()=>{});
 startSupabasePolling();
 hydrateSupabaseReferrals().catch(()=>{});
 hydrateReceiverDeliveryNotifications().catch(()=>{});
+hydrateSenderDeliveryNotifications().catch(()=>{});
 /* Login harus dijalankan paling akhir agar seluruh DOM aplikasi sudah tersedia. */
 initLoginGate();
 </script>
