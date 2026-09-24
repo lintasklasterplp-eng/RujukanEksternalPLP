@@ -370,6 +370,7 @@ body.authenticated #loginGate{display:none!important}
   .login-card{border-radius:22px}.login-watermark span{font-size:16px!important}
 }
 
+#requestedReplyList{display:none!important}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
@@ -558,7 +559,6 @@ body.authenticated #loginGate{display:none!important}
     <div class="status-card no-print" id="refStatusCard"><div class="facility-badge" style="margin-bottom:7px">MODE RUJUKAN TERINTEGRASI</div>
       <div class="status-main"><span>Status Rujukan</span><span class="status-text" id="refStatusText">Belum dikirim</span></div>
       <div class="status-detail" id="refStatusDetail">Belum ada notifikasi.</div>
-      <div class="notification-box" id="refNotification">Notifikasi akan tampil di sini.</div>
       <div class="role-notification-center" id="refRoleNotificationCenter"></div>
     </div>
     <div class="paper" id="refPaper">
@@ -652,7 +652,7 @@ body.authenticated #loginGate{display:none!important}
         <div class="section-title" style="margin-top:12px">File Balasan</div>
         <input id="requestedFileUpload" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.doc,.docx,.xls,.xlsx,.txt">
         <div class="help">Upload file yang diminta RS. Setelah file siap, klik <b>Kirim Kembali</b>.</div>
-        <div id="requestedReplyList" class="attachment-list"></div>
+        <div id="requestedReplyList" class="attachment-list" hidden></div>
       </div>
 
       <div class="sig-grid">
@@ -1216,6 +1216,7 @@ const SUPABASE_PDF_PREFIX="pdf";
 const SUPABASE_ATTACHMENT_PREFIX="attachments";
 const SUPABASE_ATTACHMENT_META_PREFIX="attachment-meta";
 const SUPABASE_RECEIVER_NOTIFICATION_PREFIX="notifications/receiver";
+const SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX="notifications/receiver-events";
 const SUPABASE_SENDER_NOTIFICATION_PREFIX="notifications/sender";
 let supabasePollTimer=null;
 let supabaseHydrating=false;
@@ -1481,6 +1482,44 @@ async function publishSenderDeliveryNotification(item,payload={}){
   await cloudUpload(path,JSON.stringify(body),"application/json");
   return {path,delivery:body};
 }
+async function publishReceiverEventNotification(item,payload={}){
+  if(!item?.no) throw new Error("Nomor rujukan belum tersedia untuk notifikasi RS.");
+  const token=`${cloudSafeNo(item.no)}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  const path=`${SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX}/${token}.json`;
+  const body={status:"ready",no:item.no,recordPath:`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,sentAt:new Date().toISOString(),...payload};
+  await cloudUpload(path,JSON.stringify(body),"application/json");
+  return {path,delivery:body};
+}
+
+async function hydrateReceiverEventNotifications(){
+  try{
+    const rows=await cloudList(SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX);
+    for(const row of (rows||[]).filter(x=>String(x.name||"").endsWith(".json"))){
+      try{
+        const delivery=await cloudDownloadJson(`${SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX}/${row.name}`);
+        if(!delivery?.no || delivery.status!=="ready") continue;
+        db=loadDB(); const item=db.referrals.find(x=>String(x.no)===String(delivery.no));
+        if(!item) continue;
+        ensurePartyNotifications(item);
+        const deliveryPath=`${SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX}/${row.name}`;
+        const createdAt=delivery.sentAt||delivery.createdAt||new Date().toISOString();
+        const message=delivery.notification||"Ada pembaruan rujukan dari Puskesmas.";
+        if(!item.partyNotifications.receiver.some(n=>String(n.deliveryPath||"")===deliveryPath)){
+          item.partyNotifications.receiver.push({id:`receiver_event_${row.name}`,message,type:(delivery.type==="file_ready"||delivery.type==="file_return")?"ok":"info",createdAt,deliveryPath});
+          item.notifications=item.notifications||[];
+          item.notifications.push({message,type:"info",createdAt,party:"receiver",deliveryPath});
+        }
+        item.fileRequest=item.fileRequest||{};
+        if(delivery.type==="request_reply" && delivery.responseMessage){ item.fileRequest.responseMessage=delivery.responseMessage; item.fileRequest.responseMessageAt=createdAt; }
+        if(delivery.type==="file_ready" && delivery.fileName){ item.fileRequest.responseFileName=delivery.fileName; item.fileRequest.fileReadyAt=createdAt; }
+        if(delivery.type==="file_return" && delivery.fileName){ item.fileRequest.sentFileName=delivery.fileName; item.fileRequest.sentAt=createdAt; }
+        saveDB(db);
+      }catch(e){ console.warn("Notifikasi event RS gagal dimuat",row.name,e); }
+    }
+  }catch(e){ console.warn("Daftar notifikasi event RS belum dapat dimuat",e); }
+  renderRoleNotificationCenter();
+}
+
 async function hydrateSenderDeliveryNotifications(){
   try{
     let rows=await cloudList(SUPABASE_SENDER_NOTIFICATION_PREFIX);
@@ -1635,6 +1674,7 @@ function startSupabasePolling(){
     if(document.visibilityState==="hidden") return;
     await hydrateSupabaseReferrals().catch(()=>{});
     await hydrateReceiverDeliveryNotifications().catch(()=>{});
+    await hydrateReceiverEventNotifications().catch(()=>{});
     await hydrateSenderDeliveryNotifications().catch(()=>{});
     renderList();
   },4000);
@@ -1884,7 +1924,6 @@ async function sendRequestedReplyMessage(){
   item.fileRequest.responseBy=item.rPenanggungJawab||item.rDokter||"UPTD Puskesmas";
   item.status=item.status==='completed'?'completed':'request_replied';
   item.updatedAt=new Date().toISOString();
-  addPartyNotification(item,'receiver',`Balasan atas instruksi RS untuk No. ${item.no}: ${msg}`,'info');
   addPartyNotification(item,'sender',`Balasan instruksi tersimpan untuk No. ${item.no}.`,'ok');
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
@@ -1893,11 +1932,11 @@ async function sendRequestedReplyMessage(){
     return;
   }
   try{
-    await publishSenderDeliveryNotification(item,{
+    await publishReceiverEventNotification(item,{
       type:"request_reply",
       request:item.fileRequest.name||"Permintaan file/informasi",
       responseMessage:msg,
-      notification:`Balasan pengirim untuk instruksi RS pada No. ${item.no}: ${msg}`
+      notification:`Balasan Puskesmas untuk instruksi RS pada No. ${item.no}: ${msg}`
     });
   }catch(e){
     alert('Balasan sudah tersimpan, tetapi notifikasi cloud belum terbentuk: '+(e?.message||''));
@@ -1905,7 +1944,7 @@ async function sendRequestedReplyMessage(){
   }
   broadcastReferral(currentRef,`Balasan instruksi RS untuk No. ${item.no} telah dikirim.`);
   const status=document.getElementById('requestedReplyMessageStatus');
-  if(status) status.textContent='Balasan sudah dikirim ke RS dan tersimpan pada data rujukan.';
+  if(status) status.textContent='';
   await renderRequestedReplyFile(currentRef);
   const rsNo=item.rWhatsApp||getDefaultWhatsApp();
   if(rsNo){
@@ -1944,28 +1983,13 @@ async function renderRequestedReplyFile(no){
     }
     const req=item.fileRequest;
     if(notice){
-      let html=`<span class="request-file-highlight"><b>RS meminta / instruksi — No. ${escapeHtml(item.no)}:</b> ${escapeHtml(req.name||req.message||'-')}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`;
-      if(req?.responseMessage){
-        html += `<div class="request-file-highlight" style="margin-top:6px;background:#edf8ef;border-color:#b8dfbd"><b>Balasan Anda:</b> ${escapeHtml(req.responseMessage)}<br><span style="font-size:9px;color:#667085">Dikirim: ${escapeHtml(formatNotificationDateTime(req.responseMessageAt))}</span></div>`;
-      }
-      notice.innerHTML=html;
-      if(cloudStatus) cloudStatus.textContent='☁ Permintaan tersinkron ke Supabase';
+      notice.innerHTML=`<span class="request-file-highlight"><b>RS meminta / instruksi — No. ${escapeHtml(item.no)}:</b> ${escapeHtml(req.name||req.message||'-')}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`;
+      if(cloudStatus) cloudStatus.textContent='☁ Instruksi tersinkron ke Supabase';
       const replyBox=document.getElementById('requestedReplyMessage');
       if(replyBox && !String(replyBox.value||'').trim()) replyBox.placeholder=`Balas permintaan RS: ${String(req.name||'')}`;
     }
     const x=await getAnswerFileAttachment(item.no);
-    if(!x){
-      el.innerHTML='<div class="help">Belum ada file yang diunggah untuk permintaan ini.</div>';
-      if(btn) btn.disabled=true;
-      return;
-    }
-    el.innerHTML=`<div class="attachment-item">
-      <div class="attachment-name" title="${escapeHtml(x.name)}"><span class="soap-badge">FILE BALASAN</span> ${escapeHtml(x.name)} <span class="help">(${formatFileSize(x.size)})</span></div>
-      <div style="display:flex;gap:5px">
-        <button type="button" class="btn-secondary" onclick="openAttachment('${encodeURIComponent(x.id)}','${encodeURIComponent(item.no)}')">Buka</button>
-        <button type="button" class="btn-danger" onclick="removeRequestedReplyFile()">Hapus</button>
-      </div>
-    </div>`;
+    if(el) el.innerHTML='';
     if(btn) btn.disabled=!(req && x && String(currentRef||item.no)===String(item.no));
   }catch(err){
     console.error(err);
@@ -2021,11 +2045,23 @@ document.getElementById('requestedFileUpload').addEventListener('change', async 
       live.fileRequest.responseFileName=file.name;
       live.fileRequest.fileReadyAt=new Date().toISOString();
       addPartyNotification(live,'sender',`File balasan sudah siap: ${file.name}. Tekan Kirim Kembali untuk mengirim ke RS.`,'ok');
-      addPartyNotification(live,'receiver',`File balasan untuk permintaan "${live.fileRequest.name}" sudah disiapkan: ${file.name}.`,'info');
       saveDB(db);
       const synced=await syncReferralNow(currentRef);
       if(!synced){
         alert('File sudah diunggah ke Supabase, tetapi status file_ready belum tersinkron. Ulangi sinkronisasi setelah koneksi pulih.');
+        return;
+      }
+      try{
+        const uploadedMeta=await getAnswerFileAttachment(currentRef);
+        await publishReceiverEventNotification(live,{
+          type:"file_ready",
+          fileName:file.name,
+          filePath:uploadedMeta?.storagePath||"",
+          request:live.fileRequest.name||"Permintaan file/informasi",
+          notification:`File yang diminta RS sudah masuk untuk No. ${live.no}: ${file.name}`
+        });
+      }catch(e){
+        alert('File sudah tersimpan di Supabase, tetapi notifikasi dashboard RS belum terbentuk: '+(e?.message||''));
         return;
       }
       broadcastReferral(currentRef,`File balasan ${file.name} sudah siap dikirim.`);
@@ -2096,10 +2132,23 @@ document.getElementById('rLampiran').addEventListener('change', async function()
     if(idx>=0){
       const item=db.referrals[idx];
       const names=uploaded.join(', ');
-      addPartyNotification(item,'receiver',`UPTD Puskesmas mengunggah lampiran: ${names}`,'ok');
       addPartyNotification(item,'sender',`Lampiran berhasil disimpan: ${names}`,'info');
       saveDB(db);
-      await syncReferralNow(currentRef);
+      const syncedAttachment=await syncReferralNow(currentRef);
+      if(!syncedAttachment){
+        alert(`Lampiran ${names} sudah disimpan di perangkat, tetapi belum tersinkron ke Supabase.`);
+        return;
+      }
+      try{
+        await publishReceiverEventNotification(item,{
+          type:"attachment_uploaded",
+          fileName:names,
+          notification:`Lampiran rujukan sudah masuk untuk No. ${item.no}: ${names}`
+        });
+      }catch(e){
+        alert(`Lampiran ${names} sudah tersimpan di Supabase, tetapi notifikasi dashboard RS belum terbentuk: ${e?.message||e}`);
+        return;
+      }
       broadcastReferral(currentRef);
       const rsNo=item.rWhatsApp||getDefaultWhatsApp();
       if(rsNo){
@@ -2948,9 +2997,7 @@ function clearCurrentRoleNotifications(){
   const party=getRoleNotificationParty();
   if(!party) return;
   localStorage.setItem(NOTIFY_CLEARED_AT_PREFIX+party,String(Date.now()));
-  const refEl=document.getElementById("refNotification");
   const ansEl=document.getElementById("answerNotification");
-  if(refEl && party==="sender") refEl.innerHTML="<strong>Notifikasi:</strong> Belum ada notifikasi baru.";
   if(ansEl && party==="receiver") ansEl.innerHTML="<strong>Notifikasi:</strong> Belum ada notifikasi baru.";
   renderGlobalIncomingNotification();
   renderRoleNotificationCenter();
@@ -3108,6 +3155,7 @@ async function handleRealtimeReferralEvent(payload){
     if(payload.kind==="record_updated"){
       await hydrateSupabaseReferrals().catch(()=>{});
       await hydrateReceiverDeliveryNotifications().catch(()=>{});
+      await hydrateReceiverEventNotifications().catch(()=>{});
       await hydrateSenderDeliveryNotifications().catch(()=>{});
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();renderRoleNotificationCenter();
       if(payload.no) await renderIncomingReferralAttachments(payload.no);
@@ -3175,25 +3223,17 @@ function openWhatsAppTo(number,message){
   return true;
 }
 function renderPartyNotifications(item){
-  const senderEl=document.getElementById("refNotification");
   const receiverEl=document.getElementById("answerNotification");
   ensurePartyNotifications(item||{});
-  const senderNotes=item?.partyNotifications?.sender||[];
   const receiverNotes=item?.partyNotifications?.receiver||[];
-  const render=(el,notes,empty)=>{
-    if(!el) return;
-    el.className="notification-box";
-    const party=el===senderEl?"sender":"receiver";
-    const visibleNotes=notes.filter(n=>isRoleNotificationVisible(n,party));
-    const list=visibleNotes.slice(-5).reverse();
-    if(!list.length){el.innerHTML=`<strong>Notifikasi:</strong> ${empty}`;return;}
-    el.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(n.createdAt))}</span><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
-    const last=list[0];
-    if(last.type==="warn") el.classList.add("warn");
-    if(last.type==="ok") el.classList.add("ok");
-  };
-  render(senderEl,senderNotes,"Belum ada notifikasi untuk pengirim.");
-  render(receiverEl,receiverNotes,"Belum ada notifikasi untuk penerima.");
+  if(!receiverEl) return;
+  receiverEl.className="notification-box";
+  const list=receiverNotes.slice(-8).reverse();
+  if(!list.length){receiverEl.innerHTML='<strong>Notifikasi:</strong> Belum ada notifikasi untuk penerima.';return;}
+  receiverEl.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(n.createdAt))}</span><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
+  const last=list[0];
+  if(last.type==="warn") receiverEl.classList.add("warn");
+  if(last.type==="ok") receiverEl.classList.add("ok");
 }
 function addNotification(no,message,type="info"){
   db=loadDB();
@@ -3267,14 +3307,9 @@ function renderCurrentStatus(){
   const item=db.referrals.find(x=>x.no===currentRef);
   const statusEl=document.getElementById("refStatusText");
   const detailEl=document.getElementById("refStatusDetail");
-  const notifEl=document.getElementById("refNotification");
   if(statusEl) statusEl.textContent=item?statusLabel(item.status):"Belum dikirim";
   const note=latestNotification(item);
-  if(detailEl) detailEl.textContent=note?`No. ${item?.no||currentRef||"-"}`:"Belum ada notifikasi.";
-  if(notifEl){
-    notifEl.className="notification-box"+(note?.type==="warn"?" warn":note?.type==="ok"?" ok":"");
-    notifEl.innerHTML=note?`<strong>Notifikasi:</strong> No. ${escapeHtml(item?.no||currentRef||"-")}<br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(note.createdAt))}</span><br>${escapeHtml(note.message)}`:`<strong>Notifikasi:</strong> Belum ada notifikasi.`;
-  }
+  if(detailEl) detailEl.textContent=note?`No. ${item?.no||currentRef||"-"} · ${formatNotificationDateTime(note.createdAt)} · ${note.message||""}`:"Belum ada notifikasi.";
   renderPartyNotifications(item||{});
   renderRoleNotificationCenter();
   const flow=document.getElementById("dashboardFlow");
@@ -3759,7 +3794,6 @@ async function sendRequestedFileBack(){
   item.fileRequest.sentFileName=file.name;
   item.updatedAt=new Date().toISOString();
   addPartyNotification(item,"sender",`File "${file.name}" dikirim kembali ke RS untuk permintaan: ${req.name}.`,"ok");
-  addPartyNotification(item,"receiver",`File "${file.name}" telah dikirim kembali dari UPTD untuk permintaan: ${req.name}.`,"ok");
   saveDB(db);
   const synced=await syncReferralNow(currentRef);
   if(!synced){
@@ -3767,12 +3801,13 @@ async function sendRequestedFileBack(){
     return;
   }
   try{
-    await publishSenderDeliveryNotification(item,{
+    await publishReceiverEventNotification(item,{
       type:"file_return",
       fileName:file.name,
       filePath:file.storagePath,
       metaPath:file.metaPath,
-      notification:`File balasan "${file.name}" telah dikirim kembali dari UPTD Puskesmas untuk No. ${item.no}.`
+      request:req.name,
+      notification:`File yang diminta RS sudah dikirim kembali dari UPTD untuk No. ${item.no}: ${file.name}`
     });
   }catch(e){
     alert("File sudah tersimpan dan status tersinkron, tetapi notifikasi cloud belum terbentuk. "+(e?.message||""));
@@ -4086,6 +4121,7 @@ initSupabaseRealtime().catch(()=>{});
 startSupabasePolling();
 hydrateSupabaseReferrals().catch(()=>{});
 hydrateReceiverDeliveryNotifications().catch(()=>{});
+hydrateReceiverEventNotifications().catch(()=>{});
 hydrateSenderDeliveryNotifications().catch(()=>{});
 renderRoleNotificationCenter();
 /* Login harus dijalankan paling akhir agar seluruh DOM aplikasi sudah tersedia. */
