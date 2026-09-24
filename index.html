@@ -1905,12 +1905,14 @@ async function renderRequestedReplyFile(no){
     const req=item?.fileRequest;
     if(notice){
       let html=req
-        ? `<span class="request-file-highlight"><b>RS meminta / instruksi:</b> ${escapeHtml(req.name)}</span>`
+        ? `<span class="request-file-highlight"><b>RS meminta / instruksi:</b> ${escapeHtml(req.name)}<br><span style="font-size:9px;color:#667085">Diterima: ${escapeHtml(formatNotificationDateTime(req.createdAt))}</span></span>`
         : 'Belum ada permintaan file dari RS.';
       if(req?.responseMessage){
-        html += `<div class="request-file-highlight" style="margin-top:6px;background:#edf8ef;border-color:#b8dfbd"><b>Balasan Anda:</b> ${escapeHtml(req.responseMessage)}</div>`;
+        html += `<div class="request-file-highlight" style="margin-top:6px;background:#edf8ef;border-color:#b8dfbd"><b>Balasan Anda:</b> ${escapeHtml(req.responseMessage)}<br><span style="font-size:9px;color:#667085">Dikirim: ${escapeHtml(formatNotificationDateTime(req.responseMessageAt))}</span></div>`;
       }
       notice.innerHTML=html;
+      const replyBox=document.getElementById('requestedReplyMessage');
+      if(replyBox && req && !String(replyBox.value||'').trim()) replyBox.placeholder=`Balas permintaan RS: ${String(req.name||'')}`;
     }
     const x=await getAnswerFileAttachment(no);
     if(!x){
@@ -2843,7 +2845,20 @@ function setRealtimeBadge(state,text){
   if(state==="offline") badge.classList.add("realtime-badge-offline");
   if(state==="error") badge.classList.add("realtime-badge-error");
 }
-function showRealtimeToast(title,message){
+function formatNotificationDateTime(value){
+  const d=new Date(value||Date.now());
+  if(Number.isNaN(d.getTime())) return "-";
+  try{
+    return new Intl.DateTimeFormat("id-ID",{
+      day:"2-digit",month:"2-digit",year:"numeric",
+      hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
+    }).format(d).replace(/\./g,":");
+  }catch(e){
+    const pad=n=>String(n).padStart(2,"0");
+    return `${pad(d.getDate())}/${pad(d.getMonth()+1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+}
+function showRealtimeToast(title,message,createdAt=null){
   let el=document.getElementById("realtimeToast");
   if(!el){
     el=document.createElement("div");
@@ -2851,11 +2866,13 @@ function showRealtimeToast(title,message){
     el.className="realtime-toast";
     document.body.appendChild(el);
   }
-  el.innerHTML=`<b>${escapeHtml(title||"Notifikasi realtime")}</b><span>${escapeHtml(message||"")}</span>`;
+  const when=formatNotificationDateTime(createdAt||Date.now());
+  el.innerHTML=`<b>${escapeHtml(title||"Notifikasi realtime")}</b><span style="display:block;font-size:9px;opacity:.72;margin-bottom:4px">${escapeHtml(when)}</span><span>${escapeHtml(message||"")}</span>`;
   el.classList.add("show");
   clearTimeout(el._timer);
   el._timer=setTimeout(()=>el.classList.remove("show"),5200);
 }
+
 function realtimeEventId(no,party,note){
   return String(note?.id||`${no}|${party}|${note?.createdAt||""}|${note?.message||""}`);
 }
@@ -2902,14 +2919,14 @@ async function handleRealtimeReferralEvent(payload){
         await renderIncomingReferralAttachments(item.no);
         if(document.getElementById('answerPanel')?.classList.contains('active')) switchTab('answerPanel');
       }
-      showRealtimeToast(`Rujukan ${item.no}`,note.message||"Ada perubahan rujukan.");
+      showRealtimeToast(`Rujukan ${item.no}`,note.message||"Ada perubahan rujukan.",note.createdAt);
       return;
     }
     if(payload.kind==="attachment_updated"){
       await hydrateSupabaseReferrals().catch(()=>{});
       await renderIncomingReferralAttachments(payload.no);
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();
-      showRealtimeToast(`Lampiran rujukan ${payload.no}`,payload.message||"Lampiran penunjang baru tersedia.");
+      showRealtimeToast(`Lampiran rujukan ${payload.no}`,payload.message||"Lampiran penunjang baru tersedia.",payload.updatedAt||Date.now());
       return;
     }
     if(payload.kind==="record_updated"){
@@ -2918,7 +2935,7 @@ async function handleRealtimeReferralEvent(payload){
       await hydrateSenderDeliveryNotifications().catch(()=>{});
       renderList();renderDashboard();renderCurrentStatus();renderGlobalIncomingNotification();
       if(payload.no) await renderIncomingReferralAttachments(payload.no);
-      if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message);
+      if(payload.message) showRealtimeToast(`Rujukan ${payload.no}`,payload.message,payload.updatedAt||Date.now());
     }
   }catch(err){console.warn("Realtime notification handler gagal",err);}
 }
@@ -2992,7 +3009,7 @@ function renderPartyNotifications(item){
     el.className="notification-box";
     const list=notes.slice(-5).reverse();
     if(!list.length){el.innerHTML=`<strong>Notifikasi:</strong> ${empty}`;return;}
-    el.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:4px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
+    el.innerHTML='<strong>Notifikasi:</strong><div style="margin-top:5px">'+list.map(n=>`<div style="padding:5px 0;border-top:1px solid rgba(0,0,0,.08)"><b>No. ${escapeHtml(item?.no||"-")}</b><br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(n.createdAt))}</span><br><span>${escapeHtml(n.message)}</span></div>`).join('')+'</div>';
     const last=list[0];
     if(last.type==="warn") el.classList.add("warn");
     if(last.type==="ok") el.classList.add("ok");
@@ -3061,7 +3078,7 @@ function renderGlobalIncomingNotification(){
   const incoming=all.find(n=>/Rujukan baru masuk|Surat rujukan/i.test(String(n.message||"")))||all[0]||null;
   if(incoming){
     incomingEl.className="notification-box"+(incoming.type==="warn"?" warn":incoming.type==="ok"?" ok":"");
-    incomingEl.innerHTML=`<strong>Surat Rujukan Masuk:</strong> No. ${escapeHtml(incoming.no||"-")}<br>${escapeHtml(incoming.message)}`;
+    incomingEl.innerHTML=`<strong>Surat Rujukan Masuk:</strong> No. ${escapeHtml(incoming.no||"-")}<br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(incoming.createdAt))}</span><br>${escapeHtml(incoming.message)}`;
   }else{
     incomingEl.className="notification-box";
     incomingEl.innerHTML="<strong>Surat Rujukan Masuk:</strong> Belum ada rujukan baru.";
@@ -3078,7 +3095,7 @@ function renderCurrentStatus(){
   if(detailEl) detailEl.textContent=note?`No. ${item?.no||currentRef||"-"}`:"Belum ada notifikasi.";
   if(notifEl){
     notifEl.className="notification-box"+(note?.type==="warn"?" warn":note?.type==="ok"?" ok":"");
-    notifEl.innerHTML=note?`<strong>Notifikasi:</strong> No. ${escapeHtml(item?.no||currentRef||"-")}<br>${escapeHtml(note.message)}`:`<strong>Notifikasi:</strong> Belum ada notifikasi.`;
+    notifEl.innerHTML=note?`<strong>Notifikasi:</strong> No. ${escapeHtml(item?.no||currentRef||"-")}<br><span style="font-size:9px;color:#667085">${escapeHtml(formatNotificationDateTime(note.createdAt))}</span><br>${escapeHtml(note.message)}`:`<strong>Notifikasi:</strong> Belum ada notifikasi.`;
   }
   renderPartyNotifications(item||{});
   const flow=document.getElementById("dashboardFlow");
@@ -3455,9 +3472,9 @@ async function confirmFileRequest(){
   await renderRequestedReplyFile(currentRef);
   const senderNo=getSenderWhatsApp();
   if(senderNo){
-    openWhatsAppTo(senderNo,`NOTIFIKASI PESAN / PERMINTAAN RS\nNo: ${old.no}\nPesan/permintaan: ${request}\nDokter penerima: ${old.answer.aDokter||"-"}`);
+    openWhatsAppTo(senderNo,`NOTIFIKASI PESAN / PERMINTAAN RS\nNo: ${old.no}\nTanggal/Waktu: ${formatNotificationDateTime(old.fileRequest.createdAt)}\nPesan/permintaan: ${request}\nDokter penerima: ${old.answer.aDokter||"-"}`);
   }
-  alert("Permintaan file/pesan untuk No. "+old.no+" berhasil dikirim dan tersinkron ke Supabase.");
+  alert("Permintaan file/pesan untuk No. "+old.no+" berhasil dikirim dan tersinkron ke Supabase pada "+formatNotificationDateTime(old.fileRequest.createdAt)+".");
 }
 async function accReferral(){
   if(!currentRef){alert("Pilih surat rujukan masuk terlebih dahulu.");return;}
@@ -3568,7 +3585,7 @@ async function sendRequestedFileBack(){
   await renderAnswerFile(currentRef);
   const rsNo=item.rWhatsApp||getDefaultWhatsApp();
   if(rsNo){
-    openWhatsAppTo(rsNo,`NOTIFIKASI FILE RUJUKAN\nNo: ${item.no}\nPermintaan RS: ${req.name}\nFile dikirim kembali: ${file.name}\nFile tersedia di Supabase dan dapat dibuka dari Form Jawaban Rujukan.`);
+    openWhatsAppTo(rsNo,`NOTIFIKASI FILE RUJUKAN\nNo: ${item.no}\nTanggal/Waktu: ${formatNotificationDateTime(item.fileRequest.sentAt)}\nPermintaan RS: ${req.name}\nFile dikirim kembali: ${file.name}\nFile tersedia di Supabase dan dapat dibuka dari Form Jawaban Rujukan.`);
   }
   alert("File untuk No. "+item.no+" berhasil dikirim kembali dan tersinkron ke Supabase.");
 }
