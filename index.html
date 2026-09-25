@@ -1768,7 +1768,15 @@ function cloudReferralPayload(item){
 }
 async function uploadReferralToSupabase(item){
   if(!item?.no) return false;
-  await cloudUpload(`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,JSON.stringify(cloudReferralPayload(item)),"application/json");
+  const payload=cloudReferralPayload(item);
+  // Manifest lampiran penunjang disimpan bersama record rujukan sebagai jalur
+  // cadangan untuk perangkat RSUD bila delivery notifikasi belum termuat.
+  if(Array.isArray(item.sentAttachments)) payload.sentAttachments=item.sentAttachments.map(x=>({
+    id:x.id,name:x.name||"Lampiran Penunjang Rujukan",type:x.type||"application/octet-stream",
+    size:Number(x.size||0),createdAt:x.createdAt||item.updatedAt||new Date().toISOString(),
+    storagePath:x.storagePath||"",metaPath:x.metaPath||"",sentToReceiverAt:x.sentToReceiverAt||item.updatedAt||new Date().toISOString()
+  }));
+  await cloudUpload(`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,JSON.stringify(payload),"application/json");
   return true;
 }
 function isOutgoingReferralSupportAttachment(x){
@@ -1877,21 +1885,42 @@ async function prepareReferralAttachmentsForSending(item){
 async function uploadReceiverDelivery(item,attachments=[]){
   if(!item?.no) throw new Error("Nomor rujukan belum tersedia.");
   const pdfPath=item.pdfStoragePath||`${SUPABASE_PDF_PREFIX}/ref/${cloudSafeNo(item.no)}.pdf`;
-  let sourceAttachments=Array.isArray(attachments)?attachments:[];
-  // Fallback aman: bila daftar delivery belum terbentuk lengkap, ambil hanya
-  // lampiran penunjang milik nomor rujukan ini dari metadata Supabase.
+  let sourceAttachments=Array.isArray(attachments)?attachments.filter(isOutgoingReferralSupportAttachment):[];
+  // Jalur cadangan pertama: manifest lampiran yang sudah dipersiapkan.
+  if(!sourceAttachments.length && Array.isArray(item.sentAttachments)) sourceAttachments=item.sentAttachments.filter(isOutgoingReferralSupportAttachment);
+  // Jalur cadangan kedua: baca langsung metadata Supabase untuk nomor ini.
+  if(!sourceAttachments.length){
+    try{ sourceAttachments=await listRemoteAttachmentMeta(item.no,true); }catch(e){ sourceAttachments=[]; }
+  }
   if(!sourceAttachments.length){
     try{ sourceAttachments=await getAttachments(item.no); }catch(e){ sourceAttachments=[]; }
   }
-  const normalizedAttachments=sourceAttachments.filter(isOutgoingReferralSupportAttachment).filter(x=>x?.id&&x?.storagePath&&x?.metaPath).map(x=>({
-    id:x.id,name:x.name||"Lampiran Penunjang Rujukan",type:x.type||"application/octet-stream",size:Number(x.size||0),
-    createdAt:x.createdAt||new Date().toISOString(),storagePath:x.storagePath,metaPath:x.metaPath,
-    sentToReceiverAt:x.sentToReceiverAt||new Date().toISOString()
-  }));
-  const delivery={type:"incoming_referral",status:"ready",no:item.no,recordPath:`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,pdfPath,pdfFilename:item.pdfFilename||`Rujukan_${String(item.no).replaceAll('/','-')}.pdf`,pdfMime:"application/pdf",pdfSize:Number(item.pdfSize||0),pdfReadyAt:item.pdfCreatedAt||new Date().toISOString(),sender:"UPTD Puskesmas Lanjut",receiver:item.rFaskesTujuan||"RSUD",sentAt:new Date().toISOString(),attachmentCount:normalizedAttachments.length,attachments:normalizedAttachments,notification:"Rujukan baru masuk dan menunggu diproses."};
+  const normalizedAttachments=[];
+  for(const x of sourceAttachments.filter(isOutgoingReferralSupportAttachment)){
+    if(!x?.id) continue;
+    let row={...x};
+    try{
+      const remote=await findRemoteAttachment(item.no,x.id,true);
+      if(remote) row={...row,...remote};
+    }catch(e){}
+    if(!row.storagePath||!row.metaPath) continue;
+    const existsFile=await cloudObjectExists(row.storagePath);
+    const existsMeta=await cloudObjectExists(row.metaPath);
+    if(!existsFile||!existsMeta) throw new Error(`Lampiran "${row.name||row.id}" belum tersedia lengkap di Supabase.`);
+    normalizedAttachments.push({
+      id:row.id,name:row.name||"Lampiran Penunjang Rujukan",type:row.type||"application/octet-stream",size:Number(row.size||0),
+      createdAt:row.createdAt||new Date().toISOString(),storagePath:row.storagePath,metaPath:row.metaPath,
+      sentToReceiverAt:row.sentToReceiverAt||new Date().toISOString()
+    });
+  }
+  const delivery={type:"incoming_referral",status:"ready",no:item.no,recordPath:`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,pdfPath,pdfFilename:item.pdfFilename||`Rujukan_${String(item.no).replaceAll('/','-')}.pdf`,pdfMime:"application/pdf",pdfSize:Number(item.pdfSize||0),pdfReadyAt:item.pdfCreatedAt||new Date().toISOString(),sender:"UPTD Puskesmas Lanjut",receiver:item.rFaskesTujuan||"RSUD",sentAt:new Date().toISOString(),attachmentCount:normalizedAttachments.length,attachmentIds:normalizedAttachments.map(x=>x.id),attachments:normalizedAttachments,notification:"Rujukan baru masuk dan menunggu diproses."};
   const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(item.no)}.json`;
   await cloudUpload(path,JSON.stringify(delivery),"application/json");
-  return {path,delivery};
+  const verify=await cloudDownloadJson(path);
+  if(!verify || String(verify.no)!==String(item.no)) throw new Error("Delivery rujukan RSUD belum dapat diverifikasi.");
+  const verifyIds=new Set((Array.isArray(verify.attachments)?verify.attachments:[]).map(x=>String(x?.id||"")));
+  for(const x of normalizedAttachments) if(!verifyIds.has(String(x.id))) throw new Error(`Lampiran "${x.name||x.id}" belum tercatat pada delivery RSUD.`);
+  return {path,delivery:verify};
 }
 async function downloadReceiverDelivery(no){
   const path=`${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${cloudSafeNo(no)}.json`;
@@ -2834,6 +2863,14 @@ async function renderIncomingReferralAttachments(no){
     // rujukan tersebut. Jadi lampiran tidak tercampur dengan nomor lain dan tidak
     // bergantung pada cache/createdAt lokal.
     let rows=Array.isArray(delivery?.attachments)?delivery.attachments.map(x=>({...x,refNo:no})).filter(isOutgoingReferralSupportAttachment):[];
+    if(!rows.length){
+      // Cadangan: manifest lampiran pada record rujukan di Supabase.
+      try{
+        db=loadDB();
+        const item=db.referrals.find(x=>String(x.no)===String(no));
+        if(Array.isArray(item?.sentAttachments)) rows=item.sentAttachments.map(x=>({...x,refNo:no})).filter(isOutgoingReferralSupportAttachment);
+      }catch(e){}
+    }
     if(!rows.length){
       // Fallback untuk data lama yang delivery-nya belum memiliki daftar attachment.
       rows=(await getAttachments(no)).filter(isOutgoingReferralSupportAttachment);
@@ -4637,6 +4674,7 @@ function loadReferralRecord(no){
   renderAttachments(currentRef);
   resetDeferredAttachmentViews(currentRef);
   renderRequestedReplyFile(currentRef);
+  if(getSession()?.mode==="receiver") renderIncomingReferralAttachments(currentRef);
   switchTab(x.answered ? "answerPanel" : "refPanel");
   renderCurrentStatus();
   updateSendAnswerButton();
@@ -5145,7 +5183,7 @@ async function sendToWhatsApp(){
     alert(`Rujukan No. ${ready.no} belum dikirim karena lampiran penunjang belum siap di Supabase.\n${e?.message||""}`);
     return;
   }
-  ready.status="sent"; ready.sentAt=ready.sentAt||new Date().toISOString(); ready.updatedAt=new Date().toISOString(); ready.pdfStoragePath=pdfPath; ready.pdfDeliveryStatus="ready"; ready.sentAttachmentIds=preparedAttachments.map(x=>x.id); ready.sentAttachmentCount=preparedAttachments.length; saveDB(db);
+  ready.status="sent"; ready.sentAt=ready.sentAt||new Date().toISOString(); ready.updatedAt=new Date().toISOString(); ready.pdfStoragePath=pdfPath; ready.pdfDeliveryStatus="ready"; ready.sentAttachmentIds=preparedAttachments.map(x=>x.id); ready.sentAttachmentCount=preparedAttachments.length; ready.sentAttachments=preparedAttachments.map(x=>({...x})); saveDB(db);
   try{
     await uploadReferralToSupabase(ready);
     const delivery=await uploadReceiverDelivery(ready,preparedAttachments);
