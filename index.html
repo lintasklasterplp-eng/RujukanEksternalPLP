@@ -2707,6 +2707,11 @@ function formatFileSize(bytes){
   return (bytes/1024/1024).toFixed(1)+" MB";
 }
 function resetDeferredAttachmentViews(no='') {
+  // Reset tampilan dan input file balasan agar pilihan file dari rujukan lama
+  // tidak terbawa saat berpindah/membuat nomor rujukan baru.
+  const requestedFileInput=document.getElementById('requestedFileUpload');
+  if(requestedFileInput) requestedFileInput.value='';
+
   const incoming=document.getElementById('incomingAttachmentList');
   const incomingBtn=document.getElementById('btnLoadIncomingAttachments');
   const incomingNotice=document.getElementById('incomingAttachmentNotice');
@@ -2754,7 +2759,9 @@ async function renderAttachments(no){
   if(!el) return;
   if(!no){el.innerHTML='<div class="help">Belum ada lampiran.</div>';return;}
   try{
-    const rows=(await getAttachments(no)).filter(x=>x.kind!=='soap');
+    // Hanya lampiran penunjang surat. File balasan UPTD (answer-file)
+    // tidak boleh tampil/terbaca sebagai lampiran rujukan.
+    const rows=(await getAttachments(no)).filter(isOutgoingReferralSupportAttachment);
     if(!rows.length){el.innerHTML='<div class="help">Belum ada lampiran.</div>';return;}
     el.innerHTML=rows.map(x=>`
       <div class="attachment-item">
@@ -3048,14 +3055,63 @@ window.openAttachment=async(encoded,encodedRefNo)=>{
     try{x=await findRemoteAttachment(targetNo,id,true);}catch(e){}
   }
   if(!x) return alert('Lampiran tidak ditemukan.');
-  let url=x.dataUrl||'';
-  if(!url && x.storagePath){try{const b=await cloudDownloadBlob(x.storagePath);if(b)url=await blobToDataUrl(b);}catch(e){console.warn(e);}}
-  if(!url) return alert('Lampiran ditemukan tetapi belum dapat dibuka.');
-  if(/^data:application\/pdf/i.test(url)){
-    const w=window.open();if(!w)return alert('Pop-up diblokir browser.');w.document.write(`<iframe src="${url}" style="border:0;width:100%;height:100vh"></iframe>`);w.document.close();
-  }else if(/^image\//i.test(x.type)){
-    const w=window.open();if(!w)return alert('Pop-up diblokir browser.');w.document.write(`<img src="${url}" style="max-width:100%;display:block;margin:0 auto">`);w.document.close();
-  }else{const a=document.createElement('a');a.href=url;a.download=x.name||'lampiran';document.body.appendChild(a);a.click();a.remove();}
+
+  let blob=null;
+  try{
+    if(x.blob instanceof Blob) blob=x.blob;
+    if(!blob && x.dataUrl) blob=dataUrlToBlob(x.dataUrl);
+    if(!blob && x.storagePath) blob=await cloudDownloadBlob(x.storagePath);
+  }catch(e){
+    console.warn('Lampiran gagal diambil dari Supabase:',e);
+  }
+  if(!blob) return alert('Lampiran ditemukan tetapi belum dapat dibuka dari Supabase.');
+
+  const modal=document.getElementById('pdfViewerModal');
+  const frame=document.getElementById('pdfViewerFrame');
+  const title=document.getElementById('pdfViewerTitle');
+  const dl=document.getElementById('pdfViewerDownload');
+  const closeBtn=document.getElementById('pdfViewerClose');
+  if(!modal||!frame||!title||!dl||!closeBtn) return alert('Viewer lampiran belum tersedia.');
+
+  const mime=String(x.type||blob.type||'').toLowerCase();
+  const canPreview=/^application\/(pdf|x-pdf)$/i.test(mime)||/^image\//i.test(mime)||/^text\//i.test(mime);
+  const url=URL.createObjectURL(blob);
+
+  // Gunakan viewer internal aplikasi, bukan window.open(), sehingga tidak
+  // terkena blokir popup browser saat membuka Lampiran Penunjang Rujukan.
+  if(!canPreview){
+    URL.revokeObjectURL(url);
+    const a=document.createElement('a');
+    a.href=x.dataUrl||url;
+    if(!x.dataUrl) a.href=URL.createObjectURL(blob);
+    a.download=x.name||'lampiran';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>{try{URL.revokeObjectURL(a.href);}catch(e){}},1000);
+    return;
+  }
+
+  // Bersihkan listener/modal sebelumnya agar viewer tidak menumpuk state lama.
+  if(window.__attachmentViewerCleanup) window.__attachmentViewerCleanup();
+  const cleanup=()=>{
+    try{frame.src='about:blank';}catch(e){}
+    try{URL.revokeObjectURL(url);}catch(e){}
+    modal.hidden=true;
+    if(window.__attachmentViewerCleanup===cleanup) window.__attachmentViewerCleanup=null;
+  };
+  window.__attachmentViewerCleanup=cleanup;
+  frame.src='about:blank';
+  frame.removeAttribute('srcdoc');
+  frame.src=url;
+  title.textContent=`Lampiran Penunjang Rujukan · ${x.name||'File'}`;
+  dl.textContent='Unduh';
+  dl.href=url;
+  dl.removeAttribute('target');
+  dl.removeAttribute('rel');
+  dl.download=x.name||'lampiran';
+  dl.onclick=null;
+  closeBtn.onclick=cleanup;
+  modal.onclick=(ev)=>{if(ev.target===modal) cleanup();};
+  modal.hidden=false;
 };
 window.removeAttachment=async(encoded)=>{
   const id=decodeURIComponent(encoded);
@@ -4468,6 +4524,8 @@ function newReferral(){
   const defaultWa=getDefaultWhatsApp();
   const lampiranInput=document.getElementById('rLampiran');
   if(lampiranInput) lampiranInput.value='';
+  const requestedFileInput=document.getElementById('requestedFileUpload');
+  if(requestedFileInput) requestedFileInput.value='';
   const waLegacy=document.getElementById("rWhatsApp");
   if(waLegacy && defaultWa) waLegacy.value=defaultWa;
   renderList();
@@ -4993,6 +5051,8 @@ async function sendRequestedFileBack(){
     broadcastReferral(currentRef,`File balasan ${file.name} berhasil dikirim kembali.`);
     await renderRequestedReplyFile(currentRef);
     await renderAnswerFile(currentRef);
+    const requestedFileInput=document.getElementById('requestedFileUpload');
+    if(requestedFileInput) requestedFileInput.value='';
     renderList(); renderCurrentStatus(); renderDashboard();
     if(btn){btn.disabled=true;btn.textContent='Sudah Dikirim';}
     alert("File untuk No. "+item.no+" berhasil dikirim kembali. File hanya dapat dikirim satu kali untuk instruksi RS ini.");
