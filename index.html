@@ -1485,6 +1485,10 @@ const SUPABASE_ATTACHMENT_META_PREFIX="attachment-meta";
 const SUPABASE_RECEIVER_NOTIFICATION_PREFIX="notifications/receiver";
 const SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX="notifications/receiver-events";
 const SUPABASE_SENDER_NOTIFICATION_PREFIX="notifications/sender";
+// Arsip permanen Jawaban Rujukan Balik adalah milik sisi Puskesmas.
+// PDF operasional jawaban RS tetap berada di pdf/answer; salinan arsip final
+// baru dibuat ketika Puskesmas menerima answer_return.
+const SUPABASE_PUSKESMAS_RETURN_ARCHIVE_PREFIX="archives/rujukan-balik";
 let supabasePollTimer=null;
 let supabaseHydrating=false;
 let supabaseLastError="";
@@ -1936,28 +1940,89 @@ function closeFileRequestState(item,when=Date.now()){
   delete item.fileRequest;
 }
 
-async function ensureAnswerReturnArchivedForSender(item,delivery){
-  if(!item?.no || !delivery?.pdfPath) return false;
+async function getPuskesmasReturnArchivePath(no){
+  return `${SUPABASE_PUSKESMAS_RETURN_ARCHIVE_PREFIX}/${cloudSafeNo(no)}.pdf`;
+}
+
+async function uploadPuskesmasReturnArchiveToSupabase(no,blob,filename,createdAt){
+  await verifyPdfBlob(blob,"Arsip PDF Rujukan Balik");
+  const path=await getPuskesmasReturnArchivePath(no);
+  await cloudUpload(path,blob,"application/pdf");
+  await verifyPdfInSupabase(path,"Arsip PDF Rujukan Balik");
+  return {path,filename,createdAt:createdAt||new Date().toISOString(),size:blob.size};
+}
+
+async function downloadPuskesmasReturnArchiveFromSupabase(no){
+  if(!no) return null;
+  const path=await getPuskesmasReturnArchivePath(no);
   try{
-    const existing=await findAnswerArchive(item.no);
-    if(existing) return true;
-    const blob=await cloudDownloadBlob(delivery.pdfPath,"pdf");
+    const blob=await cloudDownloadBlob(path,"pdf");
+    if(!blob) return null;
+    await verifyPdfBlob(blob,"Arsip PDF Rujukan Balik dari Supabase");
+    return {blob,path};
+  }catch(e){
+    return null;
+  }
+}
+
+async function deletePuskesmasReturnArchiveFromSupabase(no){
+  if(!no) return;
+  const path=await getPuskesmasReturnArchivePath(no);
+  try{ await cloudDelete(path); }catch(e){ console.warn("Arsip Rujukan Balik cloud belum terhapus:",e); }
+}
+
+async function ensureAnswerReturnArchivedForSender(item,delivery){
+  const session=getSession();
+  // Arsip Rujukan Balik hanya boleh dibentuk pada perangkat/sesi Puskesmas.
+  if(session?.mode!=="referral") return false;
+  if(!item?.no) return false;
+  try{
+    const createdAt=delivery?.sentAt||item.answer?.sentBackAt||new Date().toISOString();
+    const filename=delivery?.pdfFilename||item.answer?.pdfFilename||`Jawaban_Rujukan_${String(item.no).replaceAll('/','-')}.pdf`;
+
+    // 1. Bila arsip final sudah ada di Supabase, cukup sinkronkan salinannya ke IndexedDB Puskesmas.
+    let archived=await downloadPuskesmasReturnArchiveFromSupabase(item.no);
+    if(archived?.blob){
+      await putAnswerArchive({
+        no:item.no,
+        patient:item.rNama||item.answer?.aNama||"",
+        createdAt,
+        filename,
+        dataUrl:await blobToDataUrl(archived.blob),
+        blob:archived.blob,
+        size:archived.blob.size,
+        storagePath:archived.path,
+        ownerRole:"Puskesmas Lanjut",
+        archiveType:"rujukan-balik"
+      });
+      return true;
+    }
+
+    // 2. Ambil PDF jawaban operasional dari Supabase.
+    const sourcePath=delivery?.pdfPath||item.answer?.pdfStoragePath||`${SUPABASE_PDF_PREFIX}/answer/${cloudSafeNo(item.no)}.pdf`;
+    const blob=await cloudDownloadBlob(sourcePath,"pdf");
     if(!blob) throw new Error("PDF jawaban tidak ditemukan di Supabase.");
-    await verifyPdfBlob(blob,"Arsip PDF rujukan balik");
-    const dataUrl=await blobToDataUrl(blob);
-    const filename=delivery.pdfFilename||item.answer?.pdfFilename||`Jawaban_Rujukan_${String(item.no).replaceAll('/','-')}.pdf`;
+    await verifyPdfBlob(blob,"PDF Jawaban Rujukan");
+
+    // 3. Buat salinan arsip final pada folder milik alur Puskesmas, lalu verifikasi ulang.
+    archived=await uploadPuskesmasReturnArchiveToSupabase(item.no,blob,filename,createdAt);
+
+    // 4. Cache lokal hanya di sisi Puskesmas untuk tampilan cepat; sumber arsip tetap Supabase.
     await putAnswerArchive({
       no:item.no,
       patient:item.rNama||item.answer?.aNama||"",
-      createdAt:delivery.sentAt||new Date().toISOString(),
+      createdAt,
       filename,
-      dataUrl,
+      dataUrl:await blobToDataUrl(blob),
       blob,
-      size:blob.size
+      size:blob.size,
+      storagePath:archived.path,
+      ownerRole:"Puskesmas Lanjut",
+      archiveType:"rujukan-balik"
     });
     return true;
   }catch(e){
-    console.warn("Arsip rujukan balik otomatis belum terbentuk:",e);
+    console.warn("Arsip rujukan balik otomatis belum terbentuk di Puskesmas:",e);
     return false;
   }
 }
@@ -2361,23 +2426,82 @@ async function putAnswerArchive(item){
   });
 }
 async function getAnswerArchives(){
-  const idb=await openArchiveDB();
-  return new Promise((resolve,reject)=>{
-    const tx=idb.transaction('answerPdfs','readonly');
-    const req=tx.objectStore('answerPdfs').getAll();
-    req.onsuccess=()=>{const rows=req.result||[]; rows.sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))); idb.close(); resolve(rows);};
-    req.onerror=()=>{idb.close();reject(req.error);};
-  });
+  const local=await (async()=>{
+    const idb=await openArchiveDB();
+    return new Promise((resolve,reject)=>{
+      const tx=idb.transaction('answerPdfs','readonly');
+      const req=tx.objectStore('answerPdfs').getAll();
+      req.onsuccess=()=>{const rows=req.result||[]; idb.close(); resolve(rows);};
+      req.onerror=()=>{idb.close();reject(req.error);};
+    });
+  })();
+
+  const session=getSession();
+  if(session?.mode!=="referral") return local.sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)));
+
+  // Supabase adalah sumber utama arsip Puskesmas lintas perangkat. Sinkronkan metadata/PDF
+  // yang belum pernah masuk IndexedDB pada perangkat ini.
+  try{
+    const rows=await cloudList(SUPABASE_PUSKESMAS_RETURN_ARCHIVE_PREFIX);
+    for(const row of (rows||[]).filter(x=>String(x.name||'').toLowerCase().endsWith('.pdf'))){
+      const stem=String(row.name||'').replace(/\.pdf$/i,'');
+      if(!stem) continue;
+      const noCandidate=stem;
+      const existing=local.find(x=>cloudSafeNo(x.no)===noCandidate);
+      if(existing) continue;
+      try{
+        const no=decodeURIComponent(noCandidate).replace(/_/g,'/');
+        const path=`${SUPABASE_PUSKESMAS_RETURN_ARCHIVE_PREFIX}/${row.name}`;
+        const blob=await cloudDownloadBlob(path,"pdf");
+        if(!blob) continue;
+        await verifyPdfBlob(blob,"Arsip PDF Rujukan Balik dari Supabase");
+        db=loadDB();
+        const ref=db.referrals.find(x=>String(x.no)===String(no));
+        const createdAt=ref?.answer?.sentBackAt||ref?.answer?.receivedAt||new Date().toISOString();
+        const filename=ref?.answer?.pdfFilename||`Jawaban_Rujukan_${String(no).replaceAll('/','-')}.pdf`;
+        const entry={no,patient:ref?.rNama||ref?.answer?.aNama||"",createdAt,filename,dataUrl:await blobToDataUrl(blob),blob,size:blob.size,storagePath:path,ownerRole:"Puskesmas Lanjut",archiveType:"rujukan-balik"};
+        await putAnswerArchive(entry);
+        local.push(entry);
+      }catch(e){ console.warn("Sinkronisasi arsip rujukan balik gagal",row?.name,e); }
+    }
+  }catch(e){ console.warn("Daftar Arsip Rujukan Balik Supabase belum dapat dimuat",e); }
+  local.sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)));
+  return local;
 }
+
 async function findAnswerArchive(no){
   const idb=await openArchiveDB();
-  return new Promise((resolve,reject)=>{
+  const local=await new Promise((resolve,reject)=>{
     const tx=idb.transaction('answerPdfs','readonly');
     const req=tx.objectStore('answerPdfs').get(no);
     req.onsuccess=()=>{const x=req.result||null; idb.close(); resolve(x);};
     req.onerror=()=>{idb.close();reject(req.error);};
   });
+  if(local) return local;
+
+  if(getSession()?.mode!=="referral") return null;
+  try{
+    const remote=await downloadPuskesmasReturnArchiveFromSupabase(no);
+    if(!remote?.blob) return null;
+    db=loadDB();
+    const ref=db.referrals.find(x=>String(x.no)===String(no));
+    const entry={
+      no,
+      patient:ref?.rNama||ref?.answer?.aNama||"",
+      createdAt:ref?.answer?.sentBackAt||ref?.answer?.receivedAt||new Date().toISOString(),
+      filename:ref?.answer?.pdfFilename||`Jawaban_Rujukan_${String(no).replaceAll('/','-')}.pdf`,
+      dataUrl:await blobToDataUrl(remote.blob),
+      blob:remote.blob,
+      size:remote.blob.size,
+      storagePath:remote.path,
+      ownerRole:"Puskesmas Lanjut",
+      archiveType:"rujukan-balik"
+    };
+    await putAnswerArchive(entry);
+    return entry;
+  }catch(e){ return null; }
 }
+
 async function deleteAnswerArchive(no){
   const idb=await openArchiveDB();
   return new Promise((resolve,reject)=>{
@@ -3441,19 +3565,28 @@ async function generateAnswerPDF(no){
   if(typeof html2pdf==='undefined'){alert('Modul PDF belum termuat. Pastikan perangkat terhubung ke internet, lalu coba lagi.');return false;}
   db=loadDB(); const item=db.referrals.find(r=>r.no===no); if(!item||!item.answer)return false; let holder=null;
   try{
-    const paper=normalizePdfClone('answerPaper'); holder=createPdfRenderHost(paper); const pdfFilename=`Jawaban_Rujukan_${String(no).replaceAll('/','-')}.pdf`;
-    const blob=await createReadablePdfBlob(paper,pdfFilename); if(!(blob instanceof Blob)||blob.size<1000)throw new Error('PDF hasil render kosong atau tidak valid.');
-    const dataUrl=await blobToDataUrl(blob); const createdAt=new Date().toISOString();
-    await putAnswerArchive({no,patient:item.rNama||item.answer.aNama||'',createdAt,filename:pdfFilename,dataUrl,blob,size:blob.size});
-    db=loadDB(); const idx=db.referrals.findIndex(r=>r.no===no); if(idx>=0){db.referrals[idx].answer=db.referrals[idx].answer||{};delete db.referrals[idx].answer.pdfDataUrl;db.referrals[idx].answer.pdfFilename=pdfFilename;db.referrals[idx].answer.pdfCreatedAt=createdAt;db.referrals[idx].answer.pdfSize=blob.size;saveDB(db);}
-    try{await uploadPdfToSupabase(no,blob,pdfFilename,'answer');}catch(e){supabaseLastError=e?.message||String(e);console.warn('PDF jawaban belum tersinkron ke Supabase',e);alert('PDF Jawaban Rujukan untuk No. '+no+' berhasil dibuat, tetapi pengiriman belum selesai.');return false;}
-    await renderAnswerArchives(); return true;
-  }catch(err){console.error(err);alert('Arsip jawaban rujukan gagal dibuat: '+(err?.message||err));return false;}
-  finally{if(holder?.parentNode)holder.parentNode.removeChild(holder);}
+    const paper=normalizePdfClone('answerPaper');
+    holder=createPdfRenderHost(paper);
+    const pdfFilename=`Jawaban_Rujukan_${String(no).replaceAll('/','-')}.pdf`;
+    const blob=await createReadablePdfBlob(paper,pdfFilename);
+    if(!(blob instanceof Blob)||blob.size<1000)throw new Error('PDF hasil render kosong atau tidak valid.');
+
+    // RSUD hanya membuat dan menyimpan PDF operasional jawaban. Arsip Rujukan Balik
+    // tidak dibuat di sisi RSUD; arsip final dibuat setelah Puskesmas menerima answer_return.
+    await verifyPdfBlob(blob,'PDF Jawaban');
+    await uploadPdfToSupabase(no,blob,pdfFilename,'answer');
+    return true;
+  }catch(err){
+    console.error(err);
+    alert('PDF jawaban rujukan gagal dibuat: '+(err?.message||err));
+    return false;
+  }finally{if(holder?.parentNode)holder.parentNode.removeChild(holder);}
 }
+
 async function renderAnswerArchives(){
   const el=document.getElementById('answerArchiveList');
   if(!el) return;
+  if(getSession()?.mode!=="referral"){ el.innerHTML=""; return; }
   try{
     const rows=await getAnswerArchives();
     if(!rows.length){el.innerHTML='<div class=\"help\" style=\"padding:8px 0\">Belum ada arsip jawaban rujukan.</div>';return;}
@@ -3472,7 +3605,7 @@ async function renderAnswerArchives(){
 }
 window.openAnswerArchive=async encoded=>{
   const x=await findAnswerArchive(decodeURIComponent(encoded));
-  if(!x) return alert('Arsip jawaban tidak ditemukan.');
+  if(!x) return alert('Arsip Rujukan Balik tidak ditemukan.');
   try{
     const blob=x.blob instanceof Blob?x.blob:dataUrlToBlob(x.dataUrl);
     await verifyPdfBlob(blob,'Arsip PDF jawaban');
@@ -3480,7 +3613,7 @@ window.openAnswerArchive=async encoded=>{
     if(!modal||!frame||!title||!dl) throw new Error('Komponen viewer PDF belum tersedia.');
     const url=URL.createObjectURL(blob);
     frame.src='about:blank'; frame.removeAttribute('srcdoc'); frame.src=url;
-    title.textContent=`Arsip Jawaban Rujukan ${x.no}`;
+    title.textContent=`Arsip Rujukan Balik ${x.no}`;
     dl.href=url; dl.target='_blank'; dl.rel='noopener'; dl.download=x.filename||'Jawaban_Rujukan.pdf'; dl.onclick=null;
     modal.hidden=false;
     document.getElementById('pdfViewerClose')?.addEventListener('click',()=>{try{frame.src='about:blank';URL.revokeObjectURL(url);}catch(e){};modal.hidden=true;},{once:true});
@@ -3488,7 +3621,7 @@ window.openAnswerArchive=async encoded=>{
 };
 window.downloadAnswerArchive=async encoded=>{
   const x=await findAnswerArchive(decodeURIComponent(encoded));
-  if(!x) return alert('Arsip jawaban tidak ditemukan.');
+  if(!x) return alert('Arsip Rujukan Balik tidak ditemukan.');
   try{
     const blob=x.blob instanceof Blob?x.blob:dataUrlToBlob(x.dataUrl);
     await verifyPdfBlob(blob,'Arsip PDF jawaban');
@@ -3497,9 +3630,11 @@ window.downloadAnswerArchive=async encoded=>{
   }catch(err){ alert('PDF untuk arsip tersebut belum dapat diunduh.'); }
 };
 window.removeAnswerArchive=async encoded=>{
+  if(getSession()?.mode!=="referral"){ alert("Arsip Rujukan Balik hanya dapat dikelola oleh akun Puskesmas Lanjut."); return; }
   const no=decodeURIComponent(encoded);
-  if(!confirm('Hapus arsip jawaban rujukan nomor '+no+'? Data jawaban tetap tersimpan.')) return;
+  if(!confirm('Hapus arsip rujukan balik nomor '+no+'? Data jawaban operasional tetap tersimpan.')) return;
   await deleteAnswerArchive(no);
+  await deletePuskesmasReturnArchiveFromSupabase(no);
   await renderAnswerArchives();
 };
 
@@ -3557,6 +3692,7 @@ async function collectReferralCloudPaths(no){
     `${SUPABASE_RECORD_PREFIX}/${safe}.json`,
     `${SUPABASE_PDF_PREFIX}/ref/${safe}.pdf`,
     `${SUPABASE_PDF_PREFIX}/answer/${safe}.pdf`,
+    `${SUPABASE_PUSKESMAS_RETURN_ARCHIVE_PREFIX}/${safe}.pdf`,
     `${SUPABASE_RECEIVER_NOTIFICATION_PREFIX}/${safe}.json`
   ]);
   const prefixes=[
@@ -3583,7 +3719,7 @@ async function deleteReferralPermanently(no,{ask=true}={}){
   const normalized=String(no||"").trim();
   if(!normalized) throw new Error("Nomor surat rujukan tidak tersedia.");
   if(ask){
-    const ok=confirm(`Hapus PERMANEN surat rujukan ${normalized}?\n\nRecord, PDF surat, PDF jawaban, notifikasi, lampiran/metadata cloud, arsip PDF lokal, dan data formulir akan dihapus dan tidak dapat dipulihkan.`);
+    const ok=confirm(`Hapus PERMANEN surat rujukan ${normalized}?\n\nRecord, PDF surat, PDF jawaban, Arsip Rujukan Balik, notifikasi, lampiran/metadata cloud, arsip PDF lokal, dan data formulir akan dihapus dan tidak dapat dipulihkan.`);
     if(!ok) return false;
   }
 
@@ -4530,7 +4666,7 @@ async function sendAnswerBack(){
   live.answer.canSendBack=true;
   live.answered=true;
   live.status="completed";
-  addPartyNotification(live,"sender","Jawaban rujukan sudah dikirim kembali oleh RS dan masuk ke Arsip Jawaban Rujukan PDF.","ok");
+  addPartyNotification(live,"sender","Jawaban rujukan sudah dikirim kembali oleh RS dan siap diarsipkan sebagai Arsip Rujukan Balik PDF di UPTD Puskesmas.","ok");
   addPartyNotification(live,"receiver","Jawaban rujukan berhasil dikirim kembali ke UPTD Puskesmas.","ok");
   live.updatedAt=new Date().toISOString();
   saveDB(db);
