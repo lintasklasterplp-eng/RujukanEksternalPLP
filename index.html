@@ -1772,12 +1772,18 @@ async function uploadReferralToSupabase(item){
   await cloudUpload(`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,JSON.stringify(cloudReferralPayload(item)),"application/json");
   return true;
 }
+function isOutgoingReferralSupportAttachment(x){
+  if(!x) return false;
+  const kind=String(x.kind||'').trim().toLowerCase();
+  const id=String(x.id||'').toUpperCase();
+  // File balasan UPTD harus selalu terisolasi dari lampiran surat rujukan.
+  if(kind==='answer-file' || /::ANSWER_FILE$/.test(id)) return false;
+  if(kind==='soap') return false;
+  return true;
+}
 async function prepareReferralAttachmentsForSending(item){
   if(!item?.no) return [];
-  const rows=(await getAttachments(item.no)).filter(x=>{
-    const kind=String(x.kind||'attachment');
-    return !['soap','answer-file'].includes(kind);
-  });
+  const rows=(await getAttachments(item.no)).filter(isOutgoingReferralSupportAttachment);
   const sentAt=new Date().toISOString();
   const prepared=[];
   for(const row of rows){
@@ -1828,7 +1834,13 @@ async function prepareReferralAttachmentsForSending(item){
 async function uploadReceiverDelivery(item,attachments=[]){
   if(!item?.no) throw new Error("Nomor rujukan belum tersedia.");
   const pdfPath=item.pdfStoragePath||`${SUPABASE_PDF_PREFIX}/ref/${cloudSafeNo(item.no)}.pdf`;
-  const normalizedAttachments=(Array.isArray(attachments)?attachments:[]).filter(x=>x?.id&&x?.storagePath&&x?.metaPath).map(x=>({
+  let sourceAttachments=Array.isArray(attachments)?attachments:[];
+  // Fallback aman: bila daftar delivery belum terbentuk lengkap, ambil hanya
+  // lampiran penunjang milik nomor rujukan ini dari metadata Supabase.
+  if(!sourceAttachments.length){
+    try{ sourceAttachments=await getAttachments(item.no); }catch(e){ sourceAttachments=[]; }
+  }
+  const normalizedAttachments=sourceAttachments.filter(isOutgoingReferralSupportAttachment).filter(x=>x?.id&&x?.storagePath&&x?.metaPath).map(x=>({
     id:x.id,name:x.name||"Lampiran Penunjang Rujukan",type:x.type||"application/octet-stream",size:Number(x.size||0),
     createdAt:x.createdAt||new Date().toISOString(),storagePath:x.storagePath,metaPath:x.metaPath,
     sentToReceiverAt:x.sentToReceiverAt||new Date().toISOString()
@@ -2762,46 +2774,60 @@ async function renderIncomingReferralAttachments(no){
   const notice=document.getElementById('incomingAttachmentNotice');
   if(!el) return;
   if(!no){
-    el.innerHTML='<div class="help">Pilih surat rujukan masuk terlebih dahulu.</div>';
+    el.innerHTML="<div class='help'>Pilih surat rujukan masuk terlebih dahulu.</div>";
     if(notice) notice.textContent='Lampiran tidak dimuat otomatis. Tekan Tampilkan Lampiran untuk melihat file dari Supabase.';
     return;
   }
   try{
     const delivery=await downloadReceiverDelivery(no).catch(()=>null);
-    const deliveryIds=new Set(Array.isArray(delivery?.attachments)?delivery.attachments.map(x=>String(x.id||'' )).filter(Boolean):[]);
-    const rows=(await getAttachments(no)).filter(x=>!['soap','answer-file'].includes(String(x.kind||'')))
-      .filter(x=>deliveryIds.size ? deliveryIds.has(String(x.id||'')) : true);
+    // Sumber utama tampilan di RSUD adalah delivery yang dibuat khusus untuk nomor
+    // rujukan tersebut. Jadi lampiran tidak tercampur dengan nomor lain dan tidak
+    // bergantung pada cache/createdAt lokal.
+    let rows=Array.isArray(delivery?.attachments)?delivery.attachments.map(x=>({...x,refNo:no})).filter(isOutgoingReferralSupportAttachment):[];
     if(!rows.length){
-      el.innerHTML='<div class="help">Belum ada Lampiran Penunjang Rujukan pada rujukan ini.</div>';
+      // Fallback untuk data lama yang delivery-nya belum memiliki daftar attachment.
+      rows=(await getAttachments(no)).filter(isOutgoingReferralSupportAttachment);
+    }
+    const verified=[];
+    for(const row of rows){
+      let meta=row;
+      try{
+        const remote=await findRemoteAttachment(no,row.id,true);
+        if(remote) meta={...row,...remote,refNo:no};
+      }catch(e){}
+      if(meta?.id && (meta?.storagePath || row?.storagePath)) verified.push(meta);
+    }
+    if(!verified.length){
+      el.innerHTML="<div class='help'>Belum ada Lampiran Penunjang Rujukan pada rujukan ini.</div>";
       if(notice) notice.textContent='Belum ada Lampiran Penunjang Rujukan pada rujukan ini.';
       return;
     }
-    if(notice) notice.textContent=`${rows.length} lampiran penunjang tersedia dan dapat dibuka langsung dari perangkat ini.`;
-    el.innerHTML=rows.map(x=>{
+    if(notice) notice.textContent=`${verified.length} lampiran penunjang tersedia dan dapat dibuka langsung dari perangkat ini.`;
+    el.innerHTML=verified.map(x=>{
       const type=String(x.type||'').toLowerCase();
       const badge=/pdf/.test(type)?'PDF':/^image\//.test(type)?'GAMBAR':'DOKUMEN';
       const size=x.size?formatFileSize(x.size):'ukuran tidak diketahui';
       return `
-      <div class="incoming-attachment-item">
-        <div class="incoming-attachment-meta">
-          <div class="attachment-name" title="${escapeHtml(x.name||'Lampiran')}"><span class="attachment-type-badge">${badge}</span>${escapeHtml(x.name||'Lampiran')}</div>
-          <div class="help">${escapeHtml(size)} · ${escapeHtml(new Date(x.createdAt||Date.now()).toLocaleString('id-ID'))}</div>
+      <div class='incoming-attachment-item'>
+        <div class='incoming-attachment-meta'>
+          <div class='attachment-name' title="${escapeHtml(x.name||'Lampiran')}"><span class='attachment-type-badge'>${badge}</span>${escapeHtml(x.name||'Lampiran')}</div>
+          <div class='help'>${escapeHtml(size)} · ${escapeHtml(new Date(x.createdAt||Date.now()).toLocaleString('id-ID'))}</div>
         </div>
-        <div style="display:flex;gap:5px;flex-wrap:wrap">
-          <button type="button" class="btn-primary" onclick="openAttachment('${encodeURIComponent(x.id)}','${encodeURIComponent(no)}')">Buka</button>
+        <div style='display:flex;gap:5px;flex-wrap:wrap'>
+          <button type='button' class='btn-primary' onclick="openAttachment('${encodeURIComponent(x.id)}','${encodeURIComponent(no)}')">Buka</button>
         </div>
       </div>`;
     }).join('');
   }catch(err){
     console.error(err);
-    el.innerHTML='<div class="help">Lampiran penunjang belum dapat dimuat dari Supabase. Coba pilih ulang rujukan atau tunggu sinkronisasi realtime.</div>';
+    el.innerHTML="<div class='help'>Lampiran penunjang belum dapat dimuat dari Supabase. Coba pilih ulang rujukan atau tunggu sinkronisasi realtime.</div>";
     if(notice) notice.textContent='Sinkronisasi lampiran mengalami kendala.';
   }
 }
 async function getAnswerFileAttachment(no){
   if(!no) return null;
   const rows=await getAttachments(no);
-  return rows.find(x=>x.kind==='answer-file') || null;
+  return rows.find(x=>String(x.kind||'').toLowerCase()==='answer-file' || /::ANSWER_FILE$/i.test(String(x.id||''))) || null;
 }
 async function renderAnswerFile(no){
   const el=document.getElementById("answerFileList");
@@ -3067,7 +3093,7 @@ document.getElementById('rLampiran').addEventListener('change', async function()
       });
       const record={
         id:`${currentRef}::${Date.now()}::${Math.random().toString(36).slice(2)}`,
-        refNo:currentRef,name:file.name,size:file.size,type:file.type||'application/octet-stream',
+        refNo:currentRef,kind:'attachment',name:file.name,size:file.size,type:file.type||'application/octet-stream',
         dataUrl,createdAt:new Date().toISOString(),referralCreatedAt
       };
       const synced=await saveAttachmentRecord(record);
@@ -4440,6 +4466,8 @@ function newReferral(){
   fill(ansFields,{});
   document.getElementById("aNoSurat").value="";
   const defaultWa=getDefaultWhatsApp();
+  const lampiranInput=document.getElementById('rLampiran');
+  if(lampiranInput) lampiranInput.value='';
   const waLegacy=document.getElementById("rWhatsApp");
   if(waLegacy && defaultWa) waLegacy.value=defaultWa;
   renderList();
