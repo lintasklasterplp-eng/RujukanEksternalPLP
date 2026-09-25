@@ -1776,8 +1776,11 @@ function isOutgoingReferralSupportAttachment(x){
   if(!x) return false;
   const kind=String(x.kind||'').trim().toLowerCase();
   const id=String(x.id||'').toUpperCase();
+  const name=String(x.name||'').trim().toLowerCase();
   // File balasan UPTD harus selalu terisolasi dari lampiran surat rujukan.
-  if(kind==='answer-file' || /::ANSWER_FILE$/.test(id)) return false;
+  // Tangani juga metadata lama yang belum memiliki kind=answer-file.
+  if(kind==='answer-file' || /::ANSWER_FILE(?:$|::)/.test(id)) return false;
+  if(x.requestedName || x.replySource || x.answerFile===true || /(?:^|[ _-])(file[ _-]?balasan|balasan[ _-]?uptd)(?:[ _.-]|$)/i.test(name)) return false;
   if(kind==='soap') return false;
   return true;
 }
@@ -3676,7 +3679,7 @@ async function generateArchivePDF(no,{publishRecord=true}={}){
     // Nilai diambil dari record yang baru saja disimpan agar PDF 100% mengikuti form.
     const paper=normalizePdfClone('refPaper', item, no);
     paper.querySelectorAll('.attachment-box').forEach(el=>el.remove());
-    const allAttachments=await getAttachments(no); const attachments=allAttachments.filter(a=>!['soap','answer-file'].includes(String(a.kind||'')));
+    const allAttachments=await getAttachments(no); const attachments=allAttachments.filter(isOutgoingReferralSupportAttachment);
     if(attachments.length){const sec=document.createElement('div');sec.style.marginTop='18px';const heading=document.createElement('div');heading.textContent='LAMPIRAN PENUNJANG RUJUKAN';heading.style.fontWeight='700';heading.style.marginBottom='8px';sec.appendChild(heading);for(const a of attachments){const row=document.createElement('div');row.style.marginBottom='10px';if(/^image\//i.test(a.type)){const img=document.createElement('img');img.src=a.dataUrl||'';img.alt=a.name||'Lampiran';img.style.maxWidth='100%';img.style.maxHeight='none';img.style.display='block';img.style.margin='0 auto';row.appendChild(document.createTextNode(a.name));row.appendChild(document.createElement('br'));row.appendChild(img);}else{row.textContent=a.name+' (lampiran file)';}sec.appendChild(row);}paper.appendChild(sec);}
     holder=createPdfRenderHost(paper); const pdfFilename=`Rujukan_${String(no).replaceAll('/','-')}.pdf`; const blob=await createReadablePdfBlob(paper,pdfFilename);
     if(!(blob instanceof Blob)||blob.size<1000)throw new Error('PDF hasil render kosong atau tidak valid.');
@@ -3916,6 +3919,7 @@ window.deleteCompletedReferralNumber=deleteCompletedReferralNumber;
 
 let db=loadDB();
 let currentRef=null;
+let __freshReferralDraft=false;
 
 async function getCloudMaxReferralSequence(y){
   let maxNo=0;
@@ -4487,17 +4491,21 @@ function getCurrentReferral(){
   db=loadDB();
   return db.referrals.find(x=>x.no===currentRef)||null;
 }
-function upsertReferral({status=null,notification=null,archive=false}={}){
+function upsertReferral({status=null,notification=null,archive=false,fresh=false}={}){
   if(!currentRef) newReferral();
   db=loadDB();
-  const idx=db.referrals.findIndex(x=>x.no===currentRef);
-  const old=idx>=0?db.referrals[idx]:{};
+  const idx=db.referrals.findIndex(x=>String(x.no)===String(currentRef));
+  const treatAsFresh=!!fresh || !!__freshReferralDraft;
+  const old=(idx>=0 && !treatAsFresh)?db.referrals[idx]:{};
   const data=fields(refFields);
   const item={...old,no:currentRef,createdAt:old.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),...data,
     status:status||old.status||"saved",
-    notifications:old.notifications||[],
-    partyNotifications:old.partyNotifications||{sender:[],receiver:[]},
-    answered:!!old.answered,answer:old.answer||null
+    notifications:treatAsFresh?[]:(old.notifications||[]),
+    partyNotifications:treatAsFresh?{sender:[],receiver:[]}:(old.partyNotifications||{sender:[],receiver:[]}),
+    answered:treatAsFresh?false:!!old.answered,
+    answer:treatAsFresh?null:(old.answer||null),
+    requestedReplies:treatAsFresh?[]:(old.requestedReplies||[]),
+    fileRequest:treatAsFresh?null:(old.fileRequest||null)
   };
   ensurePartyNotifications(item);
   if(idx>=0) db.referrals[idx]=item; else db.referrals.unshift(item);
@@ -4512,6 +4520,7 @@ function upsertReferral({status=null,notification=null,archive=false}={}){
   return item;
 }
 function newReferral(){
+  __freshReferralDraft=true;
   currentRef=null;
   clearCurrentRoleNotifications();
   // Nomor baru selalu memulai siklus notifikasi yang baru.
@@ -4550,7 +4559,14 @@ function newReferral(){
 }
 async function saveReferral(){
   await ensureCurrentReferralNumberForSave();
-  const item=upsertReferral({status:"saved",archive:false});
+  const wasFresh=!!__freshReferralDraft;
+  if(wasFresh){
+    // Nomor baru wajib memulai siklus bersih. Hanya lakukan pada draft baru,
+    // bukan ketika pengguna sedang mengedit rujukan lama.
+    try{ await deleteAnswerFileForRef(currentRef); }catch(e){ console.warn('Pembersihan file balasan lama untuk nomor baru dilewati:',e); }
+  }
+  const item=upsertReferral({status:"saved",archive:false,fresh:wasFresh});
+  __freshReferralDraft=false;
   db=loadDB(); const live=db.referrals.find(r=>r.no===currentRef); if(live){live.updatedAt=new Date().toISOString();saveDB(db);}
   // Buat/upload/validasi PDF lebih dahulu. Record cloud tetap berstatus draft/saved sampai PDF tersedia.
   const pdfOk=await generateArchivePDF(currentRef,{publishRecord:false});
@@ -4565,10 +4581,14 @@ async function saveReferral(){
     return false;
   }
   commitLocalReferralSequence(item.no);
+  fill(ansFields,{});
+  document.getElementById('aNoSurat').value='';
+  resetDeferredAttachmentViews(item.no);
   alert("No. "+item.no+": surat rujukan berhasil disimpan dan siap dikirim ke RSUD.");
   return true;
 }
 function loadReferralRecord(no){
+  __freshReferralDraft=false;
   db=loadDB(); const x=db.referrals.find(r=>r.no===no); if(!x) return;
   if(sanitizeResolvedFileRequestState(x)) { x.updatedAt=new Date().toISOString(); saveDB(db); }
   currentRef=no; displayRef(no); fill(refFields,x);
