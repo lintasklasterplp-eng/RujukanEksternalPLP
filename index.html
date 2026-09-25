@@ -222,6 +222,13 @@ button{font-family:inherit}.btn-primary{background:linear-gradient(135deg,#3559e
 .warning-box{padding:9px 10px;border-radius:10px;background:#fff8e6;border:1px solid #f5d98a;font-size:11px;color:#735200;margin-top:10px}
 .danger-section{border-color:#f2cccc;background:#fffafa}
 @media(max-width:700px){.header-logo{width:52px;height:52px}.settings-grid{grid-template-columns:1fr}}
+.credentials-result{margin-top:12px;padding:12px;border-radius:12px;background:linear-gradient(180deg,#ecfff5,#f7fffb);border:1px solid #b8e8cf;display:none}
+.credentials-result.show{display:block}
+.credentials-result .cred-title{font-size:12px;font-weight:800;color:#11613d;margin-bottom:7px}
+.credentials-grid{display:grid;grid-template-columns:110px 1fr;gap:6px 9px;font-size:11px}
+.credentials-grid .cred-value{font-weight:800;color:#17213c;word-break:break-word}
+.credentials-cloud{margin-top:8px;font-size:10px;color:#3d6b56}
+
 
 /* ===== PDF RENDER 250 x 350 MM — NO CROP ===== */
 .pdf-render-host{
@@ -488,14 +495,24 @@ body.authenticated #loginGate{display:none!important}
             </div>
             <div>
               <label for="newAccountPassword">Password</label>
-              <input id="newAccountPassword" type="password" autocomplete="new-password" placeholder="Minimal 4 karakter">
+              <input id="newAccountPassword" type="text" autocomplete="new-password" placeholder="Minimal 4 karakter">
+              <div class="help">Password ditampilkan saat pembuatan agar username dan password dapat langsung dicatat.</div>
             </div>
           </div>
           <div class="settings-actions">
             <button type="button" class="btn-ok" id="btnCreateAccount">＋ Buat User</button>
           </div>
           <div class="role-lock-note">Format username wajib diakhiri <b>(Puskesmas Lanjut)</b> untuk Surat Rujukan, <b>(RSUD Dabo)</b> untuk Jawaban Rujukan, atau <b>(admin)</b> untuk Administrator. Contoh: <i>petugas ugd (RSUD Dabo)</i>.</div>
-           <div class="help" style="margin-top:10px">User tersimpan pada perangkat/browser ini. Untuk penggunaan lintas perangkat, data user perlu dipindahkan ke backend/Supabase.</div>
+          <div id="createdAccountResult" class="credentials-result" aria-live="polite">
+            <div class="cred-title">✓ USER BERHASIL DIBUAT</div>
+            <div class="credentials-grid">
+              <div>Username</div><div id="createdAccountUsername" class="cred-value">-</div>
+              <div>Password</div><div id="createdAccountPassword" class="cred-value">-</div>
+              <div>Peran</div><div id="createdAccountRole" class="cred-value">-</div>
+            </div>
+            <div id="createdAccountCloud" class="credentials-cloud">Memverifikasi penyimpanan Supabase...</div>
+          </div>
+          <div class="help" style="margin-top:10px">Daftar user dibaca dari Supabase <b>rujukan_eksternal/accounts/users.json</b>. Password disimpan sebagai <b>hash SHA-256</b> untuk autentikasi, sedangkan password asli hanya ditampilkan saat akun baru dibuat.</div>
           <div id="accountListBox"></div>
         </div>
       </div>
@@ -818,7 +835,7 @@ const RECEIVER_HIDE_KEY="puskesmas_lanjut_receiver_hidden_v1";
 const ACCOUNTS_KEY="puskesmas_lanjut_accounts_v2";
 const ACCOUNTS_CLOUD_PATH="accounts/users.json";
 const ACCOUNTS_CLOUD_SYNC_KEY="puskesmas_lanjut_accounts_cloud_synced_v1";
-const ACCOUNTS_CLOUD_VERSION=3;
+const ACCOUNTS_CLOUD_VERSION=4;
 const ADMIN_RESET_PASSWORD="admin";
 let accountsCloudReady=false;
 let accountsCloudBusy=false;
@@ -916,6 +933,17 @@ async function saveAccountsToBucket(list){
   accountsCloudLastError="";
   return normalized;
 }
+async function verifyAccountSavedToSupabase(username,passwordHash){
+  const remote=await fetchAccountsFromBucket();
+  if(!remote?.accounts?.length) throw new Error("Daftar user di Supabase kosong setelah penyimpanan.");
+  const normalized=String(username||"").trim().toLowerCase();
+  const found=remote.accounts.find(a=>String(a?.username||"").trim().toLowerCase()===normalized && a?.active!==false);
+  if(!found) throw new Error("Username baru belum ditemukan di Supabase setelah penyimpanan.");
+  if(!found.passwordHash) throw new Error("Password belum memiliki hash di Supabase.");
+  if(passwordHash && String(found.passwordHash)!==String(passwordHash)) throw new Error("Hash password di Supabase tidak sesuai dengan akun yang baru dibuat.");
+  return true;
+}
+
 async function syncAccountsFromBucket({createIfMissing=true}={}){
   if(accountsCloudBusy){
     while(accountsCloudBusy) await new Promise(r=>setTimeout(r,50));
@@ -1021,6 +1049,12 @@ async function createManagedAccount(){
   const role=document.getElementById("newAccountRole")?.value||"Petugas";
   const username=document.getElementById("newAccountUsername")?.value.trim().toLowerCase()||"";
   const password=document.getElementById("newAccountPassword")?.value||"";
+  const resultBox=document.getElementById("createdAccountResult");
+  const resultUser=document.getElementById("createdAccountUsername");
+  const resultPass=document.getElementById("createdAccountPassword");
+  const resultRole=document.getElementById("createdAccountRole");
+  const resultCloud=document.getElementById("createdAccountCloud");
+  if(resultBox) resultBox.classList.remove("show");
   if(!name||!username||!password){alert("Lengkapi nama, username dan password.");return;}
   if(password.length<4){alert("Password minimal 4 karakter.");return;}
   const suffixMap={"Puskesmas Lanjut":" (puskesmas lanjut)","RSUD Dabo":" (rsud dabo)","Admin":" (admin)"};
@@ -1029,14 +1063,25 @@ async function createManagedAccount(){
   try{
     const list=await syncAccountsFromBucket({createIfMissing:true});
     if(list.some(a=>String(a.username||"").toLowerCase()===username)){alert("Username sudah digunakan.");return;}
-    list.push({id:"u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8),name,username,role,active:true,createdAt:new Date().toISOString(),passwordHash:await hashAccountPassword(password)});
+    const passwordHash=await hashAccountPassword(password);
+    const newAccount={id:"u_"+Date.now()+"_"+Math.random().toString(36).slice(2,8),name,username,role,active:true,createdAt:new Date().toISOString(),passwordHash};
+    list.push(newAccount);
     await saveAccountsToBucket(list);
+    await verifyAccountSavedToSupabase(username,passwordHash);
+
+    if(resultUser) resultUser.textContent=username;
+    if(resultPass) resultPass.textContent=password;
+    if(resultRole) resultRole.textContent=role;
+    if(resultCloud) resultCloud.textContent="✓ Username dan hash password sudah terverifikasi tersimpan di Supabase dan dapat dipakai pada perangkat lain.";
+    if(resultBox) resultBox.classList.add("show");
+
     ["newAccountName","newAccountUsername","newAccountPassword"].forEach(id=>{const el=document.getElementById(id);if(el)el.value="";});
     await renderAccountList();
-    alert(`Akun ${username} berhasil dibuat dan tersimpan di Supabase. Akun ini dapat dipakai pada perangkat lain.`);
+    alert(`Akun ${username} berhasil dibuat. Username dan password ditampilkan pada kotak hijau, dan akun sudah terverifikasi tersimpan di Supabase.`);
   }catch(err){
     console.error("Pembuatan akun cloud gagal",err);
-    alert("Akun belum tersimpan ke Supabase. Pastikan policy Storage bucket rujukan_eksternal mengizinkan READ/INSERT/UPDATE untuk aplikasi.");
+    if(resultCloud){resultCloud.textContent="✕ Belum terverifikasi tersimpan di Supabase: "+String(err?.message||err);if(resultBox) resultBox.classList.add("show");}
+    alert("Akun belum dianggap tersimpan ke Supabase. Periksa policy Storage bucket rujukan_eksternal, lalu ulangi pembuatan akun.");
   }
 }
 
