@@ -1526,6 +1526,9 @@ const SUPABASE_RECORD_PREFIX="records";
 const SUPABASE_PDF_PREFIX="pdf";
 const SUPABASE_ATTACHMENT_PREFIX="attachments";
 const SUPABASE_ATTACHMENT_META_PREFIX="attachment-meta";
+// File balasan UPTD dipisahkan total dari lampiran penunjang surat.
+const SUPABASE_REPLY_FILE_PREFIX="reply-files";
+const SUPABASE_REPLY_FILE_META_PREFIX="reply-file-meta";
 const SUPABASE_RECEIVER_NOTIFICATION_PREFIX="notifications/receiver";
 const SUPABASE_RECEIVER_EVENT_NOTIFICATION_PREFIX="notifications/receiver-events";
 const SUPABASE_SENDER_NOTIFICATION_PREFIX="notifications/sender";
@@ -1661,7 +1664,7 @@ async function deleteReferralCloudRobust(no){
       activeBucket=activeBucket||bucket;
 
       const extraPaths=[];
-      for(const prefix of [`${SUPABASE_ATTACHMENT_PREFIX}/${safe}`,`${SUPABASE_ATTACHMENT_META_PREFIX}/${safe}`]){
+      for(const prefix of [`${SUPABASE_ATTACHMENT_PREFIX}/${safe}`,`${SUPABASE_ATTACHMENT_META_PREFIX}/${safe}`,`${SUPABASE_REPLY_FILE_PREFIX}/${safe}`,`${SUPABASE_REPLY_FILE_META_PREFIX}/${safe}`]){
         try{
           const listed=await listBucketPrefixDirect(bucket,prefix);
           if(listed.ok){
@@ -1779,16 +1782,29 @@ async function uploadReferralToSupabase(item){
   await cloudUpload(`${SUPABASE_RECORD_PREFIX}/${cloudSafeNo(item.no)}.json`,JSON.stringify(payload),"application/json");
   return true;
 }
-function isOutgoingReferralSupportAttachment(x){
+function isAnswerFileRecord(x){
   if(!x) return false;
   const kind=String(x.kind||'').trim().toLowerCase();
   const id=String(x.id||'').toUpperCase();
-  const name=String(x.name||'').trim().toLowerCase();
-  // File balasan UPTD harus selalu terisolasi dari lampiran surat rujukan.
-  // Tangani juga metadata lama yang belum memiliki kind=answer-file.
-  if(kind==='answer-file' || /::ANSWER_FILE(?:$|::)/.test(id)) return false;
-  if(x.requestedName || x.replySource || x.answerFile===true || /(?:^|[ _-])(file[ _-]?balasan|balasan[ _-]?uptd)(?:[ _.-]|$)/i.test(name)) return false;
+  const path=String(x.storagePath||'').toLowerCase();
+  const metaPath=String(x.metaPath||'').toLowerCase();
+  const name=String(x.name||'').trim();
+  return kind==='answer-file' || /::ANSWER_FILE(?:$|::)/i.test(id) ||
+    path.startsWith(SUPABASE_REPLY_FILE_PREFIX.toLowerCase()+'/') ||
+    metaPath.startsWith(SUPABASE_REPLY_FILE_META_PREFIX.toLowerCase()+'/') ||
+    x.replySource===true || x.answerFile===true ||
+    /(?:^|[ _-])(file[ _-]?balasan|balasan[ _-]?uptd)(?:[ _.-]|$)/i.test(name);
+}
+function isOutgoingReferralSupportAttachment(x){
+  if(!x || isAnswerFileRecord(x)) return false;
+  const kind=String(x.kind||'').trim().toLowerCase();
+  const id=String(x.id||'').toUpperCase();
+  const path=String(x.storagePath||'').toLowerCase();
+  const metaPath=String(x.metaPath||'').toLowerCase();
   if(kind==='soap') return false;
+  if(kind && kind!=='attachment') return false;
+  if(/::ANSWER_FILE(?:$|::)/i.test(id)) return false;
+  if(path.startsWith(SUPABASE_REPLY_FILE_PREFIX.toLowerCase()+'/') || metaPath.startsWith(SUPABASE_REPLY_FILE_META_PREFIX.toLowerCase()+'/')) return false;
   return true;
 }
 async function collectReferralSupportAttachmentsForSending(no){
@@ -1892,9 +1908,7 @@ async function uploadReceiverDelivery(item,attachments=[]){
   if(!sourceAttachments.length){
     try{ sourceAttachments=await listRemoteAttachmentMeta(item.no,true); }catch(e){ sourceAttachments=[]; }
   }
-  if(!sourceAttachments.length){
-    try{ sourceAttachments=await getAttachments(item.no); }catch(e){ sourceAttachments=[]; }
-  }
+  // Jangan fallback ke getAttachments(): delivery RSUD hanya boleh berisi manifest lampiran penunjang yang dikirim saat ini.
   const normalizedAttachments=[];
   for(const x of sourceAttachments.filter(isOutgoingReferralSupportAttachment)){
     if(!x?.id) continue;
@@ -1932,7 +1946,7 @@ async function appendIncomingDeliveryAttachments(no,attachments=[]){
   const delivery=await downloadReceiverDelivery(no).catch(()=>null);
   if(!delivery || delivery.type!=="incoming_referral") return null;
   const map=new Map((Array.isArray(delivery.attachments)?delivery.attachments:[]).map(x=>[String(x?.id||""),x]).filter(([id])=>id));
-  for(const x of attachments){
+  for(const x of attachments.filter(isOutgoingReferralSupportAttachment)){
     if(!x?.id || !x?.storagePath || !x?.metaPath) continue;
     map.set(String(x.id),{
       id:x.id,name:x.name||"Lampiran Penunjang Rujukan",type:x.type||"application/octet-stream",
@@ -2184,15 +2198,57 @@ async function purgeReferralOperationalNotifications(no){
   }catch(e){}
 }
 
-async function deleteAnswerFileForRef(no){
+async function purgeLegacyAnswerFilesForRef(no){
+  const targetNo=String(no||'').trim(); if(!targetNo) return;
+  const paths=new Set();
+  // Bersihkan file balasan versi lama yang tersimpan di attachment-meta/attachments.
   try{
-    const file=await getAnswerFileAttachment(no);
-    if(file) await deleteAttachment(file.id);
-  }catch(e){
-    console.warn("File upload balasan UPTD belum terhapus:",e);
-  }
+    const prefix=`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(targetNo)}`;
+    const listed=await listBucketPrefixDirect('rujukan_eksternal',prefix);
+    for(const row of (listed.items||[])){
+      const name=String(row?.name||'').trim(); if(!name || !/\.json$/i.test(name)) continue;
+      const metaPath=`${prefix}/${name}`; let meta=null; try{meta=await cloudDownloadJson(metaPath);}catch(e){}
+      if(!meta || !isAnswerFileRecord(meta) || String(meta.storageNamespace||'')==='reply') continue;
+      if(meta.storagePath) paths.add(meta.storagePath); paths.add(metaPath);
+    }
+  }catch(e){console.warn('Pembersihan file balasan legacy di Supabase gagal:',e);}
+  try{
+    if(paths.size) await cloudDeleteMany(Array.from(paths));
+    if(paths.size) await assertCloudDeleted(Array.from(paths));
+  }catch(e){console.warn('Verifikasi penghapusan file balasan legacy gagal:',e);}
+  // Hapus salinan legacy di perangkat; file balasan namespace baru tidak disentuh.
+  try{
+    const idb=await openArchiveDB();
+    const local=await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readonly');const req=tx.objectStore('attachments').getAll();req.onsuccess=()=>{idb.close();resolve(req.result||[]);};req.onerror=()=>{idb.close();reject(req.error);};});
+    const old=local.filter(x=>String(x.refNo||'')===targetNo && isAnswerFileRecord(x) && String(x.storageNamespace||'')!=='reply');
+    if(old.length){
+      const idb2=await openArchiveDB(); await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');for(const x of old) tx.objectStore('attachments').delete(x.id);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
+    }
+  }catch(e){console.warn('Pembersihan file balasan legacy lokal gagal:',e);}
 }
-
+async function deleteAnswerFileForRef(no){
+  const targetNo=String(no||'').trim(); if(!targetNo) return;
+  const paths=new Set();
+  try{
+    const idb=await openArchiveDB();
+    const local=await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readonly');const req=tx.objectStore('attachments').getAll();req.onsuccess=()=>{idb.close();resolve(req.result||[]);};req.onerror=()=>{idb.close();reject(req.error);};});
+    const old=local.filter(x=>String(x.refNo||'')===targetNo && isAnswerFileRecord(x));
+    const idb2=await openArchiveDB(); await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');for(const x of old) tx.objectStore('attachments').delete(x.id);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
+    for(const x of old){ if(x.storagePath) paths.add(x.storagePath); if(x.metaPath) paths.add(x.metaPath); }
+  }catch(e){console.warn('Pembersihan file balasan lokal gagal:',e);}
+  for(const prefix of [`${SUPABASE_REPLY_FILE_META_PREFIX}/${cloudSafeNo(targetNo)}`,`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(targetNo)}`]){
+    try{
+      const listed=await listBucketPrefixDirect('rujukan_eksternal',prefix);
+      for(const row of (listed.items||[])){
+        const name=String(row?.name||'').trim(); if(!name || !/\.json$/i.test(name)) continue;
+        const metaPath=`${prefix}/${name}`; let meta=null; try{meta=await cloudDownloadJson(metaPath);}catch(e){}
+        if(isAnswerFileRecord(meta||{id:name})){ if(meta?.storagePath) paths.add(meta.storagePath); paths.add(metaPath); }
+      }
+    }catch(e){console.warn('Pembersihan metadata file balasan gagal:',prefix,e);}
+  }
+  try{ if(paths.size) await cloudDeleteMany(Array.from(paths)); remoteAttachmentCache.delete(targetNo); if(paths.size) await assertCloudDeleted(Array.from(paths)); }
+  catch(e){console.warn('File balasan lama belum terhapus permanen dari Supabase:',e);}
+}
 async function finishReferralReceipt(){
   const session=getSession();
   if(session?.mode!=="referral"){
@@ -2513,11 +2569,23 @@ function startSupabasePolling(){
 async function listRemoteAttachmentMeta(no,force=false){
   if(!no)return []; if(!force&&remoteAttachmentCache.has(no))return remoteAttachmentCache.get(no);
   const prefix=`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(no)}`;const list=await cloudList(prefix);const rows=[];
-  for(const row of (list||[]).filter(x=>String(x.name||"").endsWith(".json"))){try{const meta=await cloudDownloadJson(`${prefix}/${row.name}`);if(meta?.id)rows.push(meta);}catch(e){console.warn("Gagal memuat metadata lampiran",row.name,e);}}
+  for(const row of (list||[]).filter(x=>String(x.name||'').endsWith('.json'))){try{const meta=await cloudDownloadJson(`${prefix}/${row.name}`);if(meta?.id && isOutgoingReferralSupportAttachment(meta))rows.push(meta);}catch(e){console.warn("Gagal memuat metadata lampiran",row.name,e);}}
   remoteAttachmentCache.set(no,rows);return rows;
 }
-async function findRemoteAttachment(no,id,force=false){const rows=await listRemoteAttachmentMeta(no,force);return rows.find(x=>x.id===id)||null;}
-
+async function listRemoteReplyFileMeta(no,force=false){
+  if(!no)return [];
+  const prefix=`${SUPABASE_REPLY_FILE_META_PREFIX}/${cloudSafeNo(no)}`;
+  const list=await cloudList(prefix).catch(()=>[]); const rows=[];
+  for(const row of (list||[]).filter(x=>String(x.name||'').endsWith('.json'))){
+    try{const meta=await cloudDownloadJson(`${prefix}/${row.name}`);if(meta?.id && isAnswerFileRecord(meta))rows.push(meta);}catch(e){console.warn("Gagal memuat metadata file balasan",row.name,e);}
+  }
+  return rows;
+}
+async function findRemoteAttachment(no,id,force=false){
+  const support=await listRemoteAttachmentMeta(no,force); const hit=support.find(x=>String(x.id)===String(id));
+  if(hit) return hit;
+  const replies=await listRemoteReplyFileMeta(no,force); return replies.find(x=>String(x.id)===String(id))||null;
+}
 
 const ARCHIVE_DB='puskesmas_lanjut_arsip_pdf_v1';
 function openArchiveDB(){
@@ -2659,82 +2727,57 @@ async function deleteArchive(no){
   });
 }
 async function saveAttachmentRecord(record){
+  const isReply=isAnswerFileRecord(record);
   const idb=await openArchiveDB();
   await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readwrite');tx.objectStore('attachments').put(record);tx.oncomplete=()=>{idb.close();resolve();};tx.onerror=()=>{idb.close();reject(tx.error);};});
   if(!record?.refNo || !record?.dataUrl) return {cloudSynced:false,localOnly:true};
-
   try{
-    const base=`${SUPABASE_ATTACHMENT_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}`;
+    const safeNo=cloudSafeNo(record.refNo), safeId=cloudSafeId(record.id);
+    const filePrefix=isReply?SUPABASE_REPLY_FILE_PREFIX:SUPABASE_ATTACHMENT_PREFIX;
+    const metaPrefix=isReply?SUPABASE_REPLY_FILE_META_PREFIX:SUPABASE_ATTACHMENT_META_PREFIX;
+    const base=`${filePrefix}/${safeNo}/${safeId}`;
     const storagePath=`${base}${fileExt(record.name,record.type)}`;
-    const metaPath=`${SUPABASE_ATTACHMENT_META_PREFIX}/${cloudSafeNo(record.refNo)}/${cloudSafeId(record.id)}.json`;
+    const metaPath=`${metaPrefix}/${safeNo}/${safeId}.json`;
+    const normalized={...record,storagePath,metaPath,storageNamespace:isReply?'reply':'support'}; delete normalized.dataUrl;
     await cloudUpload(storagePath,dataUrlToBlob(record.dataUrl),record.type||"application/octet-stream");
-    const meta={...record,storagePath,metaPath}; delete meta.dataUrl;
-    await cloudUpload(metaPath,JSON.stringify(meta),"application/json");
-    await cloudObjectExists(storagePath);
-    await cloudObjectExists(metaPath);
+    await cloudUpload(metaPath,JSON.stringify(normalized),"application/json");
+    if(!await cloudObjectExists(storagePath)) throw new Error(`File ${record.name||'lampiran'} tidak ditemukan setelah upload.`);
+    if(!await cloudObjectExists(metaPath)) throw new Error(`Metadata ${record.name||'lampiran'} tidak ditemukan setelah upload.`);
     remoteAttachmentCache.delete(record.refNo);
-
-    const attachmentLabel=record.kind==='soap'?'SOAP':record.kind==='answer-file'?'File balasan':'Lampiran Penunjang Rujukan';
     await publishSupabaseRealtime("referral_update",{
-      kind:"attachment_updated",
-      no:record.refNo,
-      attachmentId:record.id,
-      attachmentName:record.name,
-      attachmentKind:record.kind||"attachment",
-      updatedAt:new Date().toISOString(),
-      message:`${attachmentLabel} baru tersedia: ${record.name}`
+      kind:"attachment_updated",no:record.refNo,attachmentId:record.id,attachmentName:record.name,
+      attachmentKind:isReply?'answer-file':'attachment',storageNamespace:isReply?'reply':'support',
+      updatedAt:new Date().toISOString(),message:`${isReply?'File balasan':'Lampiran Penunjang Rujukan'} baru tersedia: ${record.name}`
     });
-
     const idb2=await openArchiveDB();
-    await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');const local={...record,storagePath,metaPath,cloudSynced:true};tx.objectStore('attachments').put(local);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
+    await new Promise((resolve,reject)=>{const tx=idb2.transaction('attachments','readwrite');const local={...record,storagePath,metaPath,storageNamespace:isReply?'reply':'support',cloudSynced:true};tx.objectStore('attachments').put(local);tx.oncomplete=()=>{idb2.close();resolve();};tx.onerror=()=>{idb2.close();reject(tx.error);};});
     return {cloudSynced:true,storagePath,metaPath};
   }catch(e){
-    supabaseLastError=e?.message||String(e);
-    console.warn("Lampiran cloud belum tersinkron",e);
-    // File balasan yang akan dikirim lintas perangkat WAJIB berada di Supabase.
-    if(String(record.kind||'')==='answer-file') throw e;
+    supabaseLastError=e?.message||String(e); console.warn("Lampiran cloud belum tersinkron",e);
+    if(isReply) throw e;
     return {cloudSynced:false,localOnly:true,error:e};
   }
 }
 async function getAttachments(no){
-  const targetNo=String(no||"").trim();
-  let cutoff=0;
-  try{
-    db=loadDB();
-    const ref=db.referrals.find(x=>String(x.no||"")===targetNo);
-    cutoff=new Date(ref?.createdAt||0).getTime();
-  }catch(e){}
-  // Ikat lampiran ke instance rujukan saat ini. Jika nomor pernah dipakai ulang
-  // setelah reset, lampiran lama tidak boleh terbawa ke rujukan baru.
-  const refCreatedAt=String(db.referrals.find(x=>String(x.no||"")===targetNo)?.createdAt||"");
+  const targetNo=String(no||"").trim(); let cutoff=0, refCreatedAt="";
+  try{ db=loadDB(); const ref=db.referrals.find(x=>String(x.no||"")===targetNo); refCreatedAt=String(ref?.createdAt||""); cutoff=new Date(refCreatedAt||0).getTime(); }catch(e){}
   const belongsToCurrentInstance=(x)=>{
-    if(String(x?.refNo||"")!==targetNo) return false;
-    // Prioritaskan penanda instance rujukan. Ini mencegah file lama ikut
-    // terbawa ketika nomor surat pernah dipakai kembali setelah reset.
+    if(String(x?.refNo||"")!==targetNo || !isOutgoingReferralSupportAttachment(x)) return false;
     if(refCreatedAt && String(x?.referralCreatedAt||"")) return String(x.referralCreatedAt)===refCreatedAt;
     if(!cutoff) return true;
-    const created=new Date(x?.createdAt||0).getTime();
-    return Number.isFinite(created) && created>=cutoff;
+    const created=new Date(x?.createdAt||0).getTime(); return Number.isFinite(created) && created>=cutoff;
   };
   const idb=await openArchiveDB();
-  const local=await new Promise((resolve,reject)=>{
-    const tx=idb.transaction('attachments','readonly');
-    const req=tx.objectStore('attachments').getAll();
-    req.onsuccess=()=>{const rows=(req.result||[]).filter(belongsToCurrentInstance);idb.close();resolve(rows);};
-    req.onerror=()=>{idb.close();reject(req.error);};
-  });
-  try{
-    const remote=await listRemoteAttachmentMeta(targetNo,true);
-    const map=new Map(remote.filter(belongsToCurrentInstance).map(x=>[x.id,x]));
-    for(const x of local) map.set(x.id,{...map.get(x.id),...x});
-    return Array.from(map.values());
-  }catch(e){return local;}
+  const local=await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readonly');const req=tx.objectStore('attachments').getAll();req.onsuccess=()=>{const rows=(req.result||[]).filter(belongsToCurrentInstance);idb.close();resolve(rows);};req.onerror=()=>{idb.close();reject(req.error);};});
+  try{ const remote=await listRemoteAttachmentMeta(targetNo,true); const map=new Map(remote.filter(belongsToCurrentInstance).map(x=>[x.id,x])); for(const x of local) map.set(x.id,{...map.get(x.id),...x}); return Array.from(map.values()); }
+  catch(e){return local;}
 }
 async function deleteAttachment(id){
   let no=currentRef, remote=null;
   try{const ridb=await openArchiveDB();remote=await new Promise((resolve,reject)=>{const tx=ridb.transaction('attachments','readonly');const req=tx.objectStore('attachments').get(id);req.onsuccess=()=>{ridb.close();resolve(req.result||null);};req.onerror=()=>{ridb.close();reject(req.error);};});no=remote?.refNo||no;}catch(e){}
   const idb=await openArchiveDB();await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readwrite');tx.objectStore('attachments').delete(id);tx.oncomplete=()=>{idb.close();resolve();};tx.onerror=()=>{idb.close();reject(tx.error);};});
-  try{remote=remote||await findRemoteAttachment(no,id,true);if(remote?.storagePath)await cloudDelete(remote.storagePath);if(remote?.metaPath)await cloudDelete(remote.metaPath);remoteAttachmentCache.delete(no);}catch(e){console.warn("Lampiran cloud belum terhapus",e);}
+  try{ remote=remote||await findRemoteAttachment(no,id,true); const paths=[remote?.storagePath,remote?.metaPath].filter(Boolean); if(paths.length) await cloudDeleteMany(paths); remoteAttachmentCache.delete(no); if(paths.length) await assertCloudDeleted(paths); }
+  catch(e){console.warn("Lampiran cloud belum terhapus",e);}
 }
 async function clearAttachmentsForRef(no){
   const targetNo=String(no||"").trim();
@@ -2871,10 +2914,7 @@ async function renderIncomingReferralAttachments(no){
         if(Array.isArray(item?.sentAttachments)) rows=item.sentAttachments.map(x=>({...x,refNo:no})).filter(isOutgoingReferralSupportAttachment);
       }catch(e){}
     }
-    if(!rows.length){
-      // Fallback untuk data lama yang delivery-nya belum memiliki daftar attachment.
-      rows=(await getAttachments(no)).filter(isOutgoingReferralSupportAttachment);
-    }
+    // Tidak memanggil getAttachments() sebagai fallback agar file lama tidak pernah tampil kembali.
     const verified=[];
     for(const row of rows){
       let meta=row;
@@ -2913,14 +2953,19 @@ async function renderIncomingReferralAttachments(no){
 }
 async function getAnswerFileAttachment(no){
   if(!no) return null;
-  const rows=await getAttachments(no);
-  return rows.find(x=>String(x.kind||'').toLowerCase()==='answer-file' || /::ANSWER_FILE$/i.test(String(x.id||''))) || null;
+  try{ const remote=await listRemoteReplyFileMeta(no,true); if(remote.length) return remote.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0))[0]; }catch(e){}
+  try{
+    const idb=await openArchiveDB();
+    const local=await new Promise((resolve,reject)=>{const tx=idb.transaction('attachments','readonly');const req=tx.objectStore('attachments').getAll();req.onsuccess=()=>{idb.close();resolve((req.result||[]).filter(x=>String(x.refNo||'')===String(no) && isAnswerFileRecord(x) && String(x.storageNamespace||'')==='reply'));};req.onerror=()=>{idb.close();reject(req.error);};});
+    return local.sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0))[0]||null;
+  }catch(e){return null;}
 }
 async function renderAnswerFile(no){
   const el=document.getElementById("answerFileList");
   if(!el) return;
   if(!no){el.innerHTML='<div class="help">Belum ada balasan dari UPTD.</div>';return;}
   try{
+    await purgeLegacyAnswerFilesForRef(no);
     db=loadDB();
     const item=db.referrals.find(x=>String(x.no)===String(no));
     const history=[...(item?.requestedReplies||[])].sort((a,b)=>new Date(b.createdAt||0)-new Date(a.createdAt||0));
@@ -3062,8 +3107,8 @@ document.getElementById('requestedFileUpload').addEventListener('change', async 
       this.value='';
       return;
     }
-    const old=await getAnswerFileAttachment(currentRef);
-    if(old) await deleteAttachment(old.id);
+    // File balasan lama/legacy dibersihkan permanen sebelum file baru disimpan.
+    await deleteAnswerFileForRef(currentRef);
     const dataUrl=await new Promise((resolve,reject)=>{
       const fr=new FileReader();
       fr.onload=()=>resolve(fr.result);
@@ -5164,7 +5209,9 @@ async function sendRequestedFileBack(){
 
 async function sendToWhatsApp(){
   await ensureCurrentReferralNumberForSave();
-  const itemBefore=upsertReferral({status:"preparing"});
+  const wasFresh=!!__freshReferralDraft;
+  if(wasFresh){ try{ await deleteAnswerFileForRef(currentRef); }catch(e){ console.warn('Pembersihan file balasan lama sebelum rujukan baru dilewati:',e); } }
+  const itemBefore=upsertReferral({status:"preparing",fresh:wasFresh});
   db=loadDB(); const live=db.referrals.find(x=>x.no===itemBefore.no);
   if(!live){alert("Data rujukan tidak ditemukan.");return;}
   live.status="preparing"; live.updatedAt=new Date().toISOString(); saveDB(db); renderCurrentStatus(); renderList(); renderDashboard();
